@@ -6,6 +6,7 @@
 #   make icon     compiles icon/recicon.rc (icon and version information) into obj/recicon.res
 #   make bin      compiles the programs of bin/ (ls, cat, cp, grep, ...) through bin/Makefile: bin/<name>/<name>.c -> bin/<name>.exe
 #   make dist     builds everything and packs antshell-win64.zip (antshell.exe, bin\ programs, data\help.ant...)
+#   make test     everything below; make test-unit and make test-console run each half on its own
 #   make test     grapheme (unicode), parser, expansion, config, completion and line editor tests
 #                 (hidden console), plus OSC 133 marks (antshell.exe inside a ConPTY)
 #
@@ -53,7 +54,7 @@ BTEST = tests/bin_test.exe
 # Windows Terminal's ConPTY for the OSC 133 test (without it, only the Windows ConPTY is tested)
 OPENCONSOLE = C:\Windows Terminal\OpenConsole.exe
 
-.PHONY: all run clean icon test bin dist
+.PHONY: all run clean icon test test-unit test-console bin dist
 
 all: $(TARGET)
 
@@ -75,7 +76,10 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 run: $(TARGET)
 	$(TARGET)
 
-test: $(TARGET) bin $(GTEST) $(CTEST) $(PTEST) $(FTEST) $(ETEST) $(KTEST) $(BTEST) $(TEST) $(OTEST)
+test: test-unit test-console
+
+# the suites that link the module they test, plus the programs of bin/: no console needed
+test-unit: $(TARGET) bin $(GTEST) $(CTEST) $(PTEST) $(FTEST) $(ETEST) $(KTEST) $(BTEST)
 	$(subst /,\,$(GTEST))
 	$(subst /,\,$(PTEST))
 	$(subst /,\,$(FTEST))
@@ -83,6 +87,9 @@ test: $(TARGET) bin $(GTEST) $(CTEST) $(PTEST) $(FTEST) $(ETEST) $(KTEST) $(BTES
 	$(subst /,\,$(KTEST))
 	$(subst /,\,$(BTEST)) bin
 	$(subst /,\,$(CTEST))
+
+# the suites that drive antshell.exe from outside, in hidden consoles and a ConPTY
+test-console: $(TARGET) bin $(TEST) $(OTEST)
 	$(subst /,\,$(TEST)) $(TARGET)
 	$(subst /,\,$(OTEST)) $(TARGET) "$(OPENCONSOLE)"
 

@@ -84,6 +84,10 @@ static void type (const wchar_t *s) {
 }
 
 /* waits for antshell.exe to consume the input and redraw */
+/* what this console is like; the cases that depend on it adapt (see inner) */
+static int  window_rows = 0;        /* rows of the window, which sets how much of the pager is visible */
+static bool astral_ok   = true;     /* does the console keep a character outside the BMP? */
+
 static void settle (void) {
 
 	DWORD pending = 1;
@@ -221,9 +225,35 @@ static void begin (void) {
 	read_row(prompt_row, prompt, prompt_len);
 }
 
+/*
+ * Some console hosts (the one of the GitHub runner, for one) read a character outside the
+ * BMP back as a single U+FFFD, while the cursor still moves over it as one wide cell. The
+ * editor is right in both cases, so when the console cannot keep the character the
+ * expectation is written the way the console will give it back.
+ */
+static const wchar_t *as_read_back (const wchar_t *s) {
+
+	static wchar_t out[16384];
+	int n = 0;
+
+	if (astral_ok)
+		return s;
+	for (; *s && n < 16383; s++) {
+		if (*s >= 0xD800 && *s <= 0xDBFF && s[1] >= 0xDC00 && s[1] <= 0xDFFF) {
+			out[n++] = 0xFFFD;
+			s++;
+		} else
+			out[n++] = *s;
+	}
+	out[n] = 0;
+	return out;
+}
+
 static void check (const char *name, const wchar_t *want_text, int want_cursor) {
 
 	static wchar_t got[16384];
+
+	want_text = as_read_back(want_text);
 
 	settle();
 	current_line(got, 16384);
@@ -1570,6 +1600,22 @@ static void run_cd_space_cases (const wchar_t *dir) {
  * On a single line: columns at 0..7, 9..15 and 17..40 (1 space between them).
  * plenty\ has 200 files to test the partial list and scrolling.
  */
+/* the grid rows the pager reports in "rows 1 to X of N" (0 if it is not showing that) */
+static int pager_total_rows (void) {
+
+	wchar_t row[512];
+
+	for (int r = 1; r <= 40; r++) {
+		wchar_t *p;
+		int a, b, total;
+
+		read_row(prompt_row + r, row, width);
+		if ((p = wcsstr(row, L"rows ")) && swscanf(p, L"rows %d to %d of %d", &a, &b, &total) == 3)
+			return total;
+	}
+	return 0;
+}
+
 static void run_tab_width_cases (void) {
 
 	begin(); key(VK_TAB, 9, 0);
@@ -1587,13 +1633,40 @@ static void run_tab_width_cases (void) {
 	check("the 1st file already goes onto the line", L"plenty\\f001.txt", 15);
 	key(VK_TAB, 9, 0);
 	settle();
-	check_true("2nd TAB shows everything ('rows 1 to')", !below_has(L"more rows") && below_has(L"rows 1 to"), "list was not open");
+	/* the footer ("rows 1 to X of N") only exists when the list does not fit the window */
+	check_true("2nd TAB shows everything ('rows 1 to')",
+		!below_has(L"more rows") && (window_rows - 2 >= 34 || below_has(L"rows 1 to")), "list was not open");
 	check("2nd TAB moves to f002", L"plenty\\f002.txt", 15);
-	/* 34 rows, 30 visible: the 33rd option (row 32 of the grid) makes the list scroll 3 rows */
+	/*
+	 * 34 grid rows: 31 DOWN keys select row 32 (0-based), the 33rd. The pager shows the window rows
+	 * minus 2 (the command line and the footer), and scrolls just enough to keep the selection in
+	 * view: with 30 visible rows that is "rows 4 to 33 of 34". The window is whatever the system
+	 * gave the hidden console, so the expectation follows it; and a console of another width lays
+	 * the grid out in another number of rows, which makes the case meaningless, so it is skipped.
+	 */
+	int grid_rows = pager_total_rows();
 	for (int i = 0; i < 31; i++)
 		key(VK_DOWN, 0, 0);
 	settle();
-	check_true("navigating scrolls the list (rows 4 to 33 of 34)", below_has(L"rows 4 to 33 of 34"), "the list did not scroll");
+	if (grid_rows == 0) {
+		fprintf(report, "SKIP  navigating scrolls the list: the whole grid fits in a window of %d rows\n", window_rows);
+	} else if (grid_rows != 34) {
+		fprintf(report, "SKIP  navigating scrolls the list: the grid has %d rows in a console %d wide, the case needs 34\n",
+			grid_rows, width);
+	} else {
+		int visible = window_rows - 2;
+		int top = 32 - visible + 1;
+		wchar_t want[64];
+
+		if (top < 0)
+			top = 0;
+		if (top + visible >= grid_rows) {
+			check_true("navigating does not scroll a list that fits the window", !below_has(L"rows "), "a footer showed up");
+		} else {
+			swprintf(want, 64, L"rows %d to %d of 34", top + 1, top + visible);
+			check_true("navigating scrolls the list", below_has(want), "the list did not scroll");
+		}
+	}
 	check("selection on the line after scrolling (f033.txt)", L"plenty\\f033.txt", 15);
 	key(VK_ESCAPE, 27, 0);
 	/* the common prefix 'f' had already gone onto the line before the pager opened */
@@ -1611,8 +1684,24 @@ static int inner (const wchar_t *term, const wchar_t *report_path) {
 	conout = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 	GetConsoleScreenBufferInfo(conout, &csbi);
 	width = csbi.dwSize.X;
-	fprintf(report, "console: %d x %d (window %d rows)\n", csbi.dwSize.X, csbi.dwSize.Y,
-		csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+	window_rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+
+	/* does this console keep a character outside the BMP? Write one the way the shell does and read it back */
+	{
+		COORD home = { 0, 0 };
+		wchar_t back[8] = { 0 };
+		DWORD n = 0;
+
+		SetConsoleCursorPosition(conout, home);
+		WriteConsoleW(conout, L"x\xD83D\xDE42y", 4, &n, NULL);
+		ReadConsoleOutputCharacterW(conout, back, 6, home, &n);
+		astral_ok = wmemchr(back, 0xD83D, n) != NULL;
+		FillConsoleOutputCharacterW(conout, L' ', 8, home, &n);
+		SetConsoleCursorPosition(conout, home);
+	}
+
+	fprintf(report, "console: %d x %d (window %d rows), characters outside the BMP %s\n", csbi.dwSize.X, csbi.dwSize.Y,
+		window_rows, astral_ok ? "are kept" : "read back as U+FFFD");
 
 	/* 1st session: in the project folder */
 	if (!start_term(term, NULL, &pi)) {
