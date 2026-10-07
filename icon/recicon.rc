@@ -34,7 +34,7 @@ BEGIN
 			VALUE "ProductName",      "AntShell"
 			VALUE "ProductVersion",   ANT_VERSION_STR
 			VALUE "Comments",         "Command line shell for Windows: sh syntax, fish-style TAB and suggestions"
-			VALUE "LegalCopyright",   "Copyright (C) Alberto"
+			VALUE "LegalCopyright",   "Copyright (C) 2026 Alberto F. Jr."
 		END
 	END
 	BLOCK "VarFileInfo"
