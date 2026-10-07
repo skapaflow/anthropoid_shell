@@ -81,9 +81,10 @@ int ant_cd_count (void) {
 	return cd_count;
 }
 
+/* NULL outside the list */
 const wchar_t *ant_cd_get (int index) {
 
-	return cd_log[index];
+	return (index >= 0 && index < cd_count) ? cd_log[index] : NULL;
 }
 
 /* shows the current folder */
@@ -196,6 +197,12 @@ bool ant_cd_implicit (const wchar_t *word) {
 		return false;
 	change_dir(path);
 	return true;
+}
+
+/* is 'word' one of the words ant_cmd_cd runs? cd, cd.., cd\ and cd/ (cd\Windows is not) */
+bool ant_cd_is_command (const wchar_t *word) {
+
+	return !_wcsicmp(word, L"cd") || !_wcsicmp(word, L"cd..") || !_wcsicmp(word, L"cd\\") || !_wcsicmp(word, L"cd/");
 }
 
 /*

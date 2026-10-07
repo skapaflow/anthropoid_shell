@@ -88,7 +88,8 @@ make bin      builds the programs in bin\ through bin\Makefile (inside bin\: `ma
 ```
 
 `antshell.exe` looks for the `data\` folder next to itself. To open it already running
-a command (the shell stays open afterwards): `antshell.exe cd src`.
+a command (the shell stays open afterwards): `antshell.exe cd src`. The arguments become
+one command line of at most 1023 bytes; an argument with spaces goes in quotes.
 
 The icon (`icon\shell_icon.ico`) and the version information that Explorer shows under
 Properties → Details live in `icon\recicon.rc`; `make` rebuilds the `.res` when either
@@ -266,7 +267,8 @@ with the same widths as Windows Terminal (Unicode 16).
   files.
 - Matching follows fish: prefix before substring, before subsequence;
   typing in lower case ignores case (`mak` finds `Makefile`). Hidden and system files
-  only show up after something was typed; names with spaces come out in quotes.
+  only show up after something was typed; names with spaces come out in quotes, and
+  names with `$` in single quotes (double quotes would still expand the `$`).
 
 ---
 

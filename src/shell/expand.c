@@ -418,6 +418,23 @@ static wchar_t *expand_path (const wchar_t *path, const char *lit) {
 }
 
 /*
+ * does a word of 'in' have a * or ? outside quotes? Only those can glob: the value of a
+ * variable never does. ($? also says yes; it only costs a glob pass that finds nothing.)
+ */
+bool ant_expand_has_wild (const ANT_CMD *in) {
+
+	for (int i = 0; i < in->argc; i++) {
+		const wchar_t *w = in->argv[i];
+		const char *l = in->lit ? in->lit[i] : NULL;
+
+		for (int k = 0; w[k]; k++)
+			if ((w[k] == L'*' || w[k] == L'?') && (!l || l[k] == QUOTE_NONE))
+				return true;
+	}
+	return false;
+}
+
+/*
  * 'out' gets the words and redirection files of 'in' with the expansions done
  * (out has no quoting information, it is ready to run); glob: also expands * and ?.
  * false: out of memory.

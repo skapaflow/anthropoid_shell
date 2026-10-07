@@ -228,7 +228,7 @@ static bool run_command (const ANT_CMD *c) {
 
 typedef struct {
 	HANDLE in, out, err; /* NULL = console */
-	HANDLE own[4];       /* handles opened for this command, closed at the end */
+	HANDLE *own;         /* handles opened for this command, closed at the end (room: STAGE_OWN) */
 	int nown;
 	bool builtin;
 	bool failed;         /* a redirection did not open: do not run */
@@ -236,9 +236,12 @@ typedef struct {
 	int status;
 } STAGE;
 
+/* what a stage can own: one handle per redirection, the two pipe ends and the NUL of & */
+#define STAGE_OWN(c) ((c)->nredir + 3)
+
 static void own (STAGE *s, HANDLE h) {
 
-	if (h && s->nown < 4)
+	if (h && h != INVALID_HANDLE_VALUE)
 		s->own[s->nown++] = h;
 }
 
@@ -566,32 +569,39 @@ bool ant_job_kill (int id, unsigned code) {
  */
 static bool run_piped (const ANT_PIPELINE *p, bool background) {
 
-	int n = p->ncmd;
+	int n = p->ncmd, slots = 0;
 	STAGE *st = calloc(n, sizeof(STAGE));
+	HANDLE *owned;
 	bool keep = true, last_external, any_external = false;
 	DWORD flags = background ? CREATE_NEW_PROCESS_GROUP : 0;
 
-	if (!st) {
+	for (int i = 0; i < n; i++)
+		slots += STAGE_OWN(&p->cmd[i]);
+	owned = malloc(sizeof(HANDLE) * slots);
+	if (!st || !owned) {
+		free(st);
+		free(owned);
 		ant_error(L"ant: out of memory");
 		ant_status = 1;
 		return true;
 	}
+	for (int i = 0, k = 0; i < n; k += STAGE_OWN(&p->cmd[i]), i++) {
+		st[i].own = owned + k;
+		st[i].builtin = ant_is_builtin(&p->cmd[i]);
+	}
 
 	/* pipes between the commands; a built-in does not read input, so whatever writes to it goes to NUL */
-	for (int i = 0; i < n; i++) {
-		st[i].builtin = ant_is_builtin(&p->cmd[i]);
-		if (i + 1 < n) {
-			HANDLE r, w;
-			if (ant_is_builtin(&p->cmd[i + 1])) {
-				w = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-				r = NULL;
-			} else if (!CreatePipe(&r, &w, NULL, PIPE_BUFFER))
-				r = w = NULL;
-			st[i].out = w;
-			own(&st[i], w);
-			st[i + 1].in = r;
-			own(&st[i + 1], r);
-		}
+	for (int i = 0; i + 1 < n; i++) {
+		HANDLE r, w;
+		if (st[i + 1].builtin) {
+			w = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+			r = NULL;
+		} else if (!CreatePipe(&r, &w, NULL, PIPE_BUFFER))
+			r = w = NULL;
+		st[i].out = w;
+		own(&st[i], w);
+		st[i + 1].in = r;
+		own(&st[i + 1], r);
 	}
 
 	/* in the background the first command reads from NUL (the redirections below may change that) */
@@ -683,6 +693,7 @@ static bool run_piped (const ANT_PIPELINE *p, bool background) {
 				SetConsoleOutputCP(CP_UTF8);
 		}
 		ant_status = 0;
+		free(owned);
 		free(st);
 		return keep;
 	}
@@ -700,6 +711,7 @@ static bool run_piped (const ANT_PIPELINE *p, bool background) {
 		SetConsoleOutputCP(CP_UTF8);
 
 	ant_status = st[n - 1].status;
+	free(owned);
 	free(st);
 	return keep;
 }
@@ -835,7 +847,8 @@ static bool expand_pipeline (const ANT_PIPELINE *p, ANT_PIPELINE *x) {
 		ANT_CMD *c = &x->cmd[i];
 		bool ok = ant_expand_cmd(&p->cmd[i], c, false);
 
-		if (ok && !ant_builtin_is_calc(c)) {
+		/* the glob pass only when there is a * or ? to expand */
+		if (ok && ant_expand_has_wild(&p->cmd[i]) && !ant_builtin_is_calc(c)) {
 			ant_expand_free(c);
 			ok = ant_expand_cmd(&p->cmd[i], c, true);
 		}

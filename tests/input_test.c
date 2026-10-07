@@ -856,15 +856,18 @@ static void run_shell_cases (void) {
 
 /* ---------- processos ---------- */
 
-/* opens antshell.exe in this console (cwd NULL = current folder) and waits for the prompt */
-static bool start_term (const wchar_t *term, const wchar_t *cwd, PROCESS_INFORMATION *pi) {
+/* opens antshell.exe in this console, with 'args' after it (NULL: none; cwd NULL = current folder), and waits for the prompt */
+static bool start_term_args (const wchar_t *term, const wchar_t *args, const wchar_t *cwd, PROCESS_INFORMATION *pi) {
 
 	STARTUPINFOW si;
-	wchar_t cmd[MAX_PATH + 4];
+	static wchar_t cmd[MAX_PATH + 4096];
 
 	memset(&si, 0, sizeof si);
 	si.cb = sizeof si;
-	swprintf(cmd, MAX_PATH + 4, L"\"%ls\"", term);
+	if (args)
+		swprintf(cmd, MAX_PATH + 4096, L"\"%ls\" %ls", term, args);
+	else
+		swprintf(cmd, MAX_PATH + 4096, L"\"%ls\"", term);
 	if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, cwd, &si, pi)) {
 		fprintf(report, "FAIL  could not open antshell.exe (%lu)\n", GetLastError());
 		failures++;
@@ -884,6 +887,11 @@ static bool start_term (const wchar_t *term, const wchar_t *cwd, PROCESS_INFORMA
 		}
 	}
 	return true;
+}
+
+static bool start_term (const wchar_t *term, const wchar_t *cwd, PROCESS_INFORMATION *pi) {
+
+	return start_term_args(term, NULL, cwd, pi);
 }
 
 /* sends 'nop' and returns the exit code */
@@ -910,6 +918,28 @@ static DWORD exit_code_of (const wchar_t *term, const wchar_t *cmd) {
 	if (!start_term(term, NULL, &pi))
 		return 99;
 	begin(); type(cmd); key(VK_RETURN, 13, 0);
+	if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0)
+		GetExitCodeProcess(pi.hProcess, &code);
+	else
+		TerminateProcess(pi.hProcess, 1);
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+	return code;
+}
+
+/* antshell.exe with arguments, which are its first command line; returns its exit code (99: did not open, 1: did not close) */
+static DWORD exit_code_with_args (const wchar_t *term, const wchar_t *args) {
+
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	static wchar_t cmd[MAX_PATH + 4096];
+	DWORD code = 1;
+
+	memset(&si, 0, sizeof si);
+	si.cb = sizeof si;
+	swprintf(cmd, MAX_PATH + 4096, L"\"%ls\" %ls", term, args);
+	if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+		return 99;
 	if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0)
 		GetExitCodeProcess(pi.hProcess, &code);
 	else
@@ -1132,6 +1162,21 @@ static void run_cd_cases (void) {
 	swprintf(text, MAX_PATH + 16, L"cd \"%ls\"", proj);
 	run(text);
 
+	/* left-cd: the selection stays inside the menu, also when Enter comes before a redraw */
+	{
+		wchar_t item[MAX_PATH + 16];
+
+		begin(); key(VK_LEFT, 0, 0); key(VK_DOWN, 0, 0); key(VK_NEXT, 0, 0); key(VK_RETURN, 13, 0);
+		settle();
+		swprintf(item, MAX_PATH + 16, L"\"%ls\"", proj);
+		check_row("left-cd: ↓ and PgDn past the end stay on the last folder", 1, item);
+		begin(); key(VK_LEFT, 0, 0); key(VK_HOME, 0, 0); key(VK_UP, 0, 0); key(VK_PRIOR, 0, 0); key(VK_RETURN, 13, 0);
+		settle();
+		check_true("left-cd: ↑ and PgUp past the top go to the first folder", row_has(1, L":\\") && !row_has(1, L"not found"),
+			"Enter did not go to a folder");
+		run(text);
+	}
+
 	/* implicit cd (fish): a folder path alone on the line enters it */
 	{
 		wchar_t cmd[MAX_PATH + 16], home[MAX_PATH];
@@ -1322,6 +1367,11 @@ static void run_redirect_cases (void) {
 	swprintf(f, MAX_PATH, L"%ls\\cderr.txt", dir);
 	check_file("a built-in error goes to 2>", f, L"nao_existe_xyz");
 	check_true("a built-in error with 2> does not show on screen", !below_has(L"nao_existe_xyz\" n"), "the error showed up on screen");
+	swprintf(f, MAX_PATH, L"%ls\\cdslash.txt", dir);
+	DeleteFileW(f);
+	swprintf(cmd, MAX_PATH * 3, L"cd\\zz_nao_existe 2> \"%ls\"", f);
+	run(cmd);
+	check_file("cd\\x is a program with 2> too (command not found)", f, L"command not found");
 	run(L"log | findstr abc123");
 	check_true("built-in in a pipe (log | findstr)", below_has(L"cmd /c echo abc123"), "the log did not go through the pipe");
 
@@ -1366,9 +1416,30 @@ static void run_redirect_cases (void) {
 	run(L"cmd /c echo x > Z:\\no\\such\\f.txt");
 	check_true("a file that does not open warns", below_has(L"cannot open"), "no warning");
 
+	/* a pipeline stage closes every file it opened (it kept 4 handles and left the 5th open) */
+	{
+		static const wchar_t *names[] = { L"r1.txt", L"r2.txt", L"r3.txt", L"r4.txt", NULL };
+		bool closed = true;
+
+		for (int i = 0; names[i]; i++) {
+			swprintf(f, MAX_PATH, L"%ls\\%ls", dir, names[i]);
+			DeleteFileW(f);
+		}
+		swprintf(cmd, MAX_PATH * 3, L"true | true > \"%ls\\r1.txt\" 2> \"%ls\\r2.txt\" > \"%ls\\r3.txt\" 2> \"%ls\\r4.txt\" | true",
+			dir, dir, dir, dir);
+		run(cmd);
+		for (int i = 0; names[i]; i++) {
+			swprintf(f, MAX_PATH, L"%ls\\%ls", dir, names[i]);
+			if (!DeleteFileW(f))
+				closed = false;
+		}
+		check_true("a pipeline stage with 4 redirections closes them all (the files can be deleted)", closed,
+			"a file is still open in the shell");
+	}
+
 	/* limpeza */
 	static const wchar_t *files[] = { L"out.txt", L"in.txt", L"sorted.txt", L"err.txt", L"both.txt",
-		L"ver.txt", L"cd.txt", L"cderr.txt", NULL };
+		L"ver.txt", L"cd.txt", L"cderr.txt", L"cdslash.txt", NULL };
 	for (int i = 0; files[i]; i++) {
 		swprintf(f, MAX_PATH, L"%ls\\%ls", dir, files[i]);
 		DeleteFileW(f);
@@ -1673,6 +1744,55 @@ static void run_tab_width_cases (void) {
 	check("Esc goes back to the line with the common prefix", L"plenty\\f", 8);
 }
 
+/* the arguments of antshell.exe are its first command line (files in a folder of %TEMP%) */
+static void run_args_cases (const wchar_t *term) {
+
+	static wchar_t args[MAX_PATH + 4096];
+	wchar_t dir[MAX_PATH], sub[MAX_PATH], f[MAX_PATH];
+	PROCESS_INFORMATION pi;
+
+	GetTempPathW(MAX_PATH, dir);
+	wcscat(dir, L"ant_args_test");
+	CreateDirectoryW(dir, NULL);
+	swprintf(sub, MAX_PATH, L"%ls\\pasta ação 中文", dir);
+	swprintf(f, MAX_PATH, L"%ls\\quote.txt", dir);
+	/* nothing left over from an earlier run */
+	RemoveDirectoryW(sub);
+	DeleteFileW(f);
+	CreateDirectoryW(sub, NULL);
+
+	check_true("the arguments are the first command line (exit 4)", exit_code_with_args(term, L"exit 4") == 4, NULL);
+
+	/* main's argv comes in the ANSI code page: accents and CJK only survive the UTF-16 command line */
+	swprintf(args, MAX_PATH + 4096, L"cd \"%ls\" && exit 4 || exit 5", sub);
+	check_true("an argument with accents and CJK reaches cd intact", exit_code_with_args(term, args) == 4, "cd failed");
+
+	swprintf(args, MAX_PATH + 4096, L"echo \"say \\\"hi\\\"\" > \"%ls\" && exit 6", f);
+	check_true("an argument with \" inside runs (exit 6)", exit_code_with_args(term, args) == 6, NULL);
+	check_file("an argument with \" inside keeps it (echo)", f, L"say \"hi\"");
+
+	/* longer than a line: a message, nothing runs and the shell goes on to the prompt */
+	wcscpy(args, L"echo ");
+	for (int i = 0; i < 2000; i++)
+		wcscat(args, L"x");
+	if (start_term_args(term, args, NULL, &pi)) {
+		wchar_t row[512];
+		bool warned = false;
+
+		begin();
+		for (int r = 1; r <= 4 && !warned; r++) {
+			read_row(prompt_row - r, row, width);
+			warned = wcsstr(row, L"arguments are too long") != NULL;
+		}
+		check_true("arguments longer than a line are refused with a message", warned, "no message above the prompt");
+		check_true("after the refused arguments the shell is still open (nop closes with 0)", stop_term(&pi) == 0, NULL);
+	}
+
+	DeleteFileW(f);
+	RemoveDirectoryW(sub);
+	RemoveDirectoryW(dir);
+}
+
 static int inner (const wchar_t *term, const wchar_t *report_path) {
 
 	PROCESS_INFORMATION pi;
@@ -1725,6 +1845,8 @@ static int inner (const wchar_t *term, const wchar_t *report_path) {
 	check_true("true; exit closes with 0", exit_code_of(term, L"true; exit") == 0, NULL);
 	check_true("a bare nop closes with 0 even after an error", exit_code_of(term, L"false; nop") == 0, NULL);
 	check_true("nop 5 closes with 5", exit_code_of(term, L"nop 5") == 5, NULL);
+
+	run_args_cases(term);
 
 	/* pager session: a fixed tree, independent of how the project organizes its folders */
 	{

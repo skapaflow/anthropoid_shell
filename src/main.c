@@ -14,7 +14,7 @@ int main (int argc, char const *argv[]) {
 	if (argc == 1)
 		ant_logo(22);
 
-	ant_shell_run(argc, argv);
+	ant_shell_run(argc > 1);
 
 #ifdef __WIN32__
 	SetConsoleOutputCP(ant_saved_codepage);

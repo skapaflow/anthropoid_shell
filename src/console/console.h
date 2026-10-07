@@ -24,15 +24,8 @@
 #define _WHITE 119
 #define _GRAY 136
 
-extern void set_cursor_xy (int, int);
-extern void get_cursor_xy (int *, int *);
 extern int get_console_width (void);
-extern int get_console_height (void);
-extern void set_cursor_hide (bool);
 extern void set_cursor_type (bool, bool);
-extern void get_screen_size (int *, int *);
-extern void get_clipboard (char *);
-extern void get_current_directory (char *);
 extern int print (int, const char *, ...);
 extern void ant_error (const wchar_t *, ...);
 extern void ant_write (const wchar_t *);

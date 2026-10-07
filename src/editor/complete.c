@@ -455,13 +455,25 @@ bool ant_complete_is_prefix (const ANT_COMPLETE *c) {
 	return c->rank < RANK(MATCH_SUBSTR, CASE_SAME);
 }
 
-/* characters that need quotes in cmd */
+/* characters that need quotes (the shell's, and the ones cmd also quoted) */
 static bool needs_quotes (const wchar_t *s, int n) {
 
 	for (int i = 0; i < n; i++)
-		if (wcschr(L" !%&(){}[]=';`,^~+", s[i]))
+		if (wcschr(L" !%&(){}[]=';`,^~+$", s[i]))
 			return true;
 	return false;
+}
+
+/*
+ * the quote for a completed path: $ expands even inside double quotes (expand.c), so a
+ * name with $ goes inside single quotes, unless it also has a ' (there is no escape)
+ */
+static wchar_t quote_for (const ANT_COMPLETE *c, const wchar_t *name, int nlen) {
+
+	bool dollar = wcschr(c->dir, L'$') || wmemchr(name, L'$', nlen);
+	bool apostrophe = wcschr(c->dir, L'\'') || wmemchr(name, L'\'', nlen);
+
+	return (dollar && !apostrophe) ? L'\'' : L'"';
 }
 
 /*
@@ -476,6 +488,7 @@ int ant_complete_text (const ANT_COMPLETE *c, int item, int mode, wchar_t *out, 
 	int dlen = wcslen(c->dir);
 	bool dir = (item >= 0 && c->items[item].dir);
 	bool quote = c->quoted || needs_quotes(c->dir, dlen) || needs_quotes(name, nlen);
+	wchar_t q = quote_for(c, name, nlen);
 	int k = 0;
 
 	if (dlen + nlen + 5 > max)
@@ -484,13 +497,13 @@ int ant_complete_text (const ANT_COMPLETE *c, int item, int mode, wchar_t *out, 
 	if (c->lead)
 		out[k++] = c->lead;
 	if (quote)
-		out[k++] = L'"';
+		out[k++] = q;
 	wmemcpy(out + k, c->dir, dlen);
 	k += dlen;
 	wmemcpy(out + k, name, nlen);
 	k += nlen;
 	if (quote && mode != ANT_APPLY_PREFIX)
-		out[k++] = L'"';
+		out[k++] = q;
 	if (mode == ANT_APPLY_UNIQUE && !dir)
 		out[k++] = L' ';
 	out[k] = 0;

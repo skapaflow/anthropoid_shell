@@ -5,24 +5,7 @@
 #include <windows.h>
 
 #include "console.h"
-#include "../types/string_util.h"
 #include "../shell/shell.h"
-
-void set_cursor_xy (int x, int y) {
-
-	COORD coPos;
-	coPos.X = x;
-	coPos.Y = y;
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), coPos);
-}
-
-void get_cursor_xy (int *x, int *y) {
-
-	CONSOLE_SCREEN_BUFFER_INFO csbi;
-	GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
-	if (x) *x = csbi.dwCursorPosition.X;
-	if (y) *y = csbi.dwCursorPosition.Y;
-}
 
 int get_console_width (void) {
 
@@ -32,68 +15,12 @@ int get_console_width (void) {
 	return w.dwMaximumWindowSize.X;
 }
 
-int get_console_height (void) {
-
-	/* get terminal size */
-	CONSOLE_SCREEN_BUFFER_INFO h;
-	GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &h);
-	return h.dwMaximumWindowSize.Y;
-}
-
-void set_cursor_hide (bool visible) {
-
-	CONSOLE_CURSOR_INFO cci;
-	cci.dwSize = 1;
-	cci.bVisible = visible;
-	SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &cci);
-}
-
 void set_cursor_type (bool insert, bool visible) {
 
 	CONSOLE_CURSOR_INFO cci;
 	cci.dwSize = insert ? 10 : 99;
 	cci.bVisible = visible;
 	SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &cci);
-}
-
-void get_screen_size (int *max_x, int *max_y) {
-
-	CONSOLE_SCREEN_BUFFER_INFO csbi;
-	if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
-		csbi.dwSize.X = 80;
-		csbi.dwSize.Y = 25;
-	}
-	*max_x = csbi.dwSize.X;
-	*max_y = csbi.dwSize.Y;
-}
-
-void get_clipboard (char *str) {
-
-	if (OpenClipboard(NULL)) {
-		HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-		if (hData != NULL) {
-			wchar_t *pszText = (wchar_t*) GlobalLock(hData);
-			if (pszText != NULL) {
-				char buf[128] = {0};
-				to_narrowchar(buf, pszText);
-				strcpy(str, buf);
-				GlobalUnlock(hData);
-			}
-		}
-		CloseClipboard();
-	}
-}
-
-void get_current_directory (char *path) {
-
-	char *buf = malloc(sizeof(char) * ANTMAX);
-	GetModuleFileName(0, (char*)buf, MAX_PATH);
-	char *b = buf;
-	while (*b++);
-	while (*--b != '\\');
-	*b = 0;
-	strcpy(path, buf);
-	free(buf);
 }
 
 int print (int color, const char *fmt, ...) {

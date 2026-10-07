@@ -23,7 +23,7 @@ static const wchar_t *dirs[] = {
 };
 static const wchar_t *files[] = {
 	L"Makefile", L"docs.txt", L"foo2.txt", L"foo10.txt", L"src\\main.c",
-	L".hidden", L"hid.txt", L"a\U0001F60Ab.txt", NULL
+	L".hidden", L"hid.txt", L"a\U0001F60Ab.txt", L"data2\\pay$day.txt", L"data2\\it's $5.txt", NULL
 };
 
 static void u8 (const wchar_t *w, char *out, int max) {
@@ -163,6 +163,9 @@ int main (void) {
 	check_apply("inside quotes it continues", L"cd \"Program Files\\Com", L"cd \"Program Files\\Common Files\\\"");
 	check_apply("slash / stays /", L"cd src/in", L"cd src/include/");
 	check_apply("emoji in the name", L"type a", L"type a\U0001F60Ab.txt ");
+	check_apply("a name with $ goes in single quotes ($ expands inside double ones)", L"type data2\\pay", L"type 'data2\\pay$day.txt' ");
+	check_apply("typed in double quotes, a name with $ still gets single ones", L"type \"data2\\pay", L"type 'data2\\pay$day.txt' ");
+	check_apply("a name with $ and ' keeps double quotes (no escape for ')", L"type data2\\it", L"type \"data2\\it's $5.txt\" ");
 
 	/* word in the middle of the line: completes up to the cursor */
 	{

@@ -1,31 +1,29 @@
-#include <stdio.h>
 #include <windows.h>
 
 #include "clear.h"
+#include "../console/console.h"
+#include "../shell/shell.h"
 
+/* '.': clears the screen (the console's buffer, not only the window) */
 void ant_cmd_clear (void) {
 
-    HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hStdOut == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "Could not get the console handle.\n");
-        return;
-    }
+	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	COORD home = { 0, 0 };
+	DWORD cells, count;
 
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (!GetConsoleScreenBufferInfo(hStdOut, &csbi)) {
-        fprintf(stderr, "Could not get the console buffer information.\n");
-        return;
-    }
+	if (!GetConsoleScreenBufferInfo(out, &csbi)) {
+		ant_error(L"ant: .: the output is not a console");
+		ant_status = 1;
+		return;
+	}
 
-    DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
-    DWORD count;
-    COORD homeCoords = {0, 0};
-
-    if (!FillConsoleOutputCharacter(hStdOut, ' ', cellCount, homeCoords, &count) ||
-        !FillConsoleOutputAttribute(hStdOut, csbi.wAttributes, cellCount, homeCoords, &count)) {
-        fprintf(stderr, "Could not clear the console screen.\n");
-        return;
-    }
-
-    SetConsoleCursorPosition(hStdOut, homeCoords);
+	cells = csbi.dwSize.X * csbi.dwSize.Y;
+	if (!FillConsoleOutputCharacterW(out, L' ', cells, home, &count) ||
+		!FillConsoleOutputAttribute(out, csbi.wAttributes, cells, home, &count)) {
+		ant_error(L"ant: .: cannot clear the screen (error %lu)", GetLastError());
+		ant_status = 1;
+		return;
+	}
+	SetConsoleCursorPosition(out, home);
 }

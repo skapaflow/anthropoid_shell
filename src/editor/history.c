@@ -243,12 +243,12 @@ void ant_history_print (int max) {
 			cmd += 2;
 			keep = *cmd;
 			*cmd = 0;
-			to_narrowchar(narrow, sp);
+			to_narrowchar(narrow, sizeof narrow, sp);
 			print(GRAY, "%s", narrow);
 			*cmd = keep;
 			sp = cmd;
 		}
-		to_narrowchar(narrow, sp);
+		to_narrowchar(narrow, sizeof narrow, sp);
 		printf("%s\n", narrow);
 	}
 	free(lines);

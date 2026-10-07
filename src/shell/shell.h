@@ -2,6 +2,7 @@
 #define ANT_SHELL_SHELL_H
 
 #include <wchar.h>
+#include <stdbool.h>
 
 #define ANTMIN 128
 #define ANTMID 512
@@ -13,6 +14,6 @@ extern volatile int ant_interrupted; /* Ctrl+C or Ctrl+Break arrived (the shell 
 extern int ant_prev_status; /* ant_status before the command that is running (what a bare "exit" returns) */
 extern char    char_line_buf[ANTMAX];
 
-extern void ant_shell_run (int , char const **);
+extern void ant_shell_run (bool);
 
 #endif

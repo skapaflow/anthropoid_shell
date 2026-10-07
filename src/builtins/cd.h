@@ -14,6 +14,7 @@ extern const wchar_t *ant_cd_get (int);
 extern void ant_cd_to (const wchar_t *);
 extern bool ant_cd_is_implicit (const wchar_t *);
 extern bool ant_cd_implicit (const wchar_t *);
+extern bool ant_cd_is_command (const wchar_t *);
 extern bool ant_cmd_cd (const ANT_ARG *);
 
 #endif

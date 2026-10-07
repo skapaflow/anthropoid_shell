@@ -22,7 +22,6 @@
 #include "../shell/args.h"
 #include "../shell/execute.h"
 #include "../shell/shell.h"
-#include "../types/string_util.h"
 
 /*************************************************************
  * Built-in commands: the dispatch table, plus the small     *
@@ -335,7 +334,7 @@ bool ant_is_builtin (const ANT_CMD *c) {
 			return true;
 	if (w[0] == L'@' || ant_env_is_assignment(c) || kill_has_jobs(c))
 		return true;
-	if (!_wcsnicmp(w, L"cd", 2) && (!w[2] || wcschr(L".\\/:<>", w[2])))
+	if (ant_cd_is_command(w))
 		return true;
 	if (c->argc == 1 && ant_cd_is_implicit(w))
 		return true;

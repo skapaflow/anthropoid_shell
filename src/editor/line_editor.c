@@ -958,12 +958,27 @@ static void copy_next_from_history (void) {
 	}
 }
 
+/*
+ * keeps the selection of F7 and left-cd inside the list after every key: the redraw
+ * also does it, but it is skipped while keys are queued, and Enter uses the index
+ */
+static void list_clamp (void) {
+
+	int total = (popup == POPUP_DIRS) ? ant_cd_count() : ant_history_count();
+
+	if (list_selected > total - 1)
+		list_selected = total - 1;
+	if (list_selected < 0)
+		list_selected = 0;
+}
+
 static void popup_open (int kind) {
 
 	popup = kind;
 	number_len = 0;
 	number[0] = 0;
 	list_selected = ant_history_displayed();
+	list_clamp();
 	list_top = -1;
 	dirty = true;
 }
@@ -973,6 +988,7 @@ static void popup_open_dirs (void) {
 
 	popup = POPUP_DIRS;
 	list_selected = ant_cd_count() - 1;
+	list_clamp();
 	list_top = -1;
 	dirty = true;
 }
@@ -1022,7 +1038,7 @@ static int popup_key (const KEY_EVENT_RECORD *k) {
 				number[--number_len] = 0;
 			break;
 		case POPUP_DIRS: /* left-cd: Enter goes to the folder, Left closes */
-			if (ch == L'\r') {
+			if (ch == L'\r' && ant_cd_get(list_selected)) {
 				/* the line stays empty: "cd <folder>" goes straight to the history and to the shell */
 				swprintf(leftcd, ANTMAX, L"cd \"%ls\"", ant_cd_get(list_selected));
 				leftcd_run = true;
@@ -1052,6 +1068,7 @@ static int popup_key (const KEY_EVENT_RECORD *k) {
 					list_selected += list_height;
 					break;
 			}
+			list_clamp();
 			break;
 		case POPUP_LIST: /* F7 */
 			if (ch == L'\r') {
@@ -1096,6 +1113,7 @@ static int popup_key (const KEY_EVENT_RECORD *k) {
 					list_selected += list_height;
 					break;
 			}
+			list_clamp();
 			break;
 	}
 	return INPUT_KEEP;
@@ -1398,7 +1416,7 @@ void ant_editor_read_line (const char *str) {
 		command_pending = true;
 	}
 
-	to_narrowchar(char_line_buf, leftcd_run && result == INPUT_ACCEPT ? leftcd : line);
+	to_narrowchar(char_line_buf, ANTMAX, leftcd_run && result == INPUT_ACCEPT ? leftcd : line);
 
 	SetConsoleCursorInfo(hout, &cursor_info);
 	SetConsoleMode(hin, in_mode);

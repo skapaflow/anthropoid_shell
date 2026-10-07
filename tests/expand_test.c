@@ -61,6 +61,25 @@ static void check (const wchar_t *line, const wchar_t *want) {
 	printf("FAIL  %s\n      expected: %s\n      got:      %s\n", l, a, b);
 }
 
+/* ant_expand_has_wild: execute.c only does the glob pass when it says yes */
+static void check_wild (const wchar_t *line, bool want) {
+
+	ANT_LIST list;
+	bool got = false;
+	char l[1024];
+
+	if (ant_parse(line, &list)) {
+		got = ant_expand_has_wild(&list.p[0].cmd[0]);
+		ant_parse_free(&list);
+	}
+	total++;
+	if (got == want)
+		return;
+	failures++;
+	WideCharToMultiByte(CP_UTF8, 0, line, -1, l, sizeof l, NULL, NULL);
+	printf("FAIL  wild: %s\n      expected: %s\n      got:      %s\n", l, want ? "yes" : "no", got ? "yes" : "no");
+}
+
 static void touch (const wchar_t *path) {
 
 	HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -151,6 +170,15 @@ int main (void) {
 	check(L"ls > $ANT_T.txt", L"{ls >value.txt}");
 	check(L"ls 2>> ~\\log", L"{ls 2>>C:\\home\\log}");
 	check(L"ls > *.txt", L"{ls >*.txt}");
+
+	/* which commands need the glob pass */
+	check_wild(L"ls *.c", true);
+	check_wild(L"ls a?.c", true);
+	check_wild(L"ls x \"y\" *", true);
+	check_wild(L"ls src\\main.c", false);
+	check_wild(L"ls '*.c' \"?\"", false);
+	check_wild(L"ls $ANT_STAR", false);
+	check_wild(L"ls > *.txt", false);
 
 	/* glob in a known folder */
 	GetCurrentDirectoryW(MAX_PATH, old);

@@ -80,7 +80,8 @@ static BOOL WINAPI ctrl_handler (DWORD event) {
 	return FALSE;
 }
 
-void ant_shell_run (int argc, char const **argv) {
+/* has_args: antshell.exe got arguments, which are the first command line */
+void ant_shell_run (bool has_args) {
 
 	/* the cd history starts at the current folder */
 	ant_cd_init();
@@ -112,11 +113,11 @@ void ant_shell_run (int argc, char const **argv) {
 		config_reload();
 
 		/* antshell.exe arguments are the first command line; after that, the line editor */
-		if (argc == 1)
+		if (!has_args)
 			ant_editor_read_line(NULL);
 		else {
-			ant_args_to_line(argc, argv);
-			argc = 1;
+			ant_args_to_line();
+			has_args = false;
 		}
 
 		keep = ant_run(char_line_buf);
