@@ -1,0 +1,212 @@
+# AntShell: templates for the mk command (mk main.c creates main.c from the [.c] template).
+#
+#   [.c .h]       starts a template for these extensions (the last extension of the name decides)
+#   [=Makefile]   starts a template for an exact name (wins over the extension)
+#
+# Each template runs up to the next header; whatever comes before the first one is a comment.
+# Without a template for the name, the file comes out empty (mk main, mk notes.txt).
+# In the text: {name} = name without extension, {NAME} = the same in upper case and only with
+# letters/digits/_ (header guard), {year} = current year.
+# mk -l lists the templates; mk -f overwrites a file that already exists.
+
+[.c]
+#include <stdio.h>
+
+int main (int argc, char **argv) {
+
+	printf("Hello World!\n");
+
+	return 0;
+}
+
+[.h]
+#ifndef {NAME}_H
+#define {NAME}_H
+
+#endif
+
+[.cpp .cc]
+#include <iostream>
+
+using namespace std;
+
+int main (void) {
+
+	cout << "Hello World!\n";
+
+	return 0;
+}
+
+[.hpp]
+#ifndef {NAME}_HPP
+#define {NAME}_HPP
+
+#endif
+
+[.cs]
+using System;
+
+class {name} {
+
+	static void Main (string[] args) {
+		Console.WriteLine("Hello World!");
+	}
+}
+
+[.java]
+public class {name} {
+
+	public static void main (String[] args) {
+		System.out.println("Hello World!");
+	}
+}
+
+[.go]
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello World!")
+}
+
+[.rs]
+fn main() {
+	println!("Hello World!");
+}
+
+[.py]
+def main():
+	print("Hello World!")
+
+
+if __name__ == "__main__":
+	main()
+
+[.js .mjs]
+console.log("Hello World!");
+
+[.ts]
+function main(): void {
+	console.log("Hello World!");
+}
+
+main();
+
+[.lua]
+print("Hello World!")
+
+[.php]
+<?php
+
+echo "Hello World!\n";
+
+[.sh]
+#!/bin/sh
+
+echo "Hello World!"
+
+[.bat .cmd]
+@echo off
+
+echo Hello World!
+
+[.ps1]
+Write-Host "Hello World!"
+
+[.html .htm]
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>{name}</title>
+	</head>
+	<body>
+		<!-- code -->
+	</body>
+</html>
+
+[.css]
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+}
+
+[.json]
+{
+}
+
+[.xml]
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+</root>
+
+[.yml .yaml]
+# {name}
+
+[.md]
+# {name}
+
+[.sql]
+-- {name}
+
+SELECT 1;
+
+[.ini .cfg]
+[main]
+
+[.ant]
+# {name}
+
+[=Makefile]
+CC     = clang
+CFLAGS = -Wall -Wextra -O2
+TARGET = app.exe
+SRC    = $(wildcard *.c)
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) $(SRC) -o $@
+
+clean:
+	del $(TARGET)
+
+.PHONY: all clean
+
+[=README.md]
+# {name}
+
+[=LICENSE]
+MIT License
+
+Copyright (c) {year}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+[=.gitignore]
+*.o
+*.obj
+*.exe
+*.d
+*.log

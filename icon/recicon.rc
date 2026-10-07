@@ -1,0 +1,44 @@
+/*
+ * antshell.exe resources: the icon and the version information Explorer shows
+ * in Properties > Details. The Makefile compiles this file into
+ * obj/recicon.res (make icon) and links it into antshell.exe.
+ */
+
+#include <winver.h>
+
+/* same version as the logo (ver) */
+#define ANT_VERSION_BIN 2025,0,0,0
+#define ANT_VERSION_STR "2025"
+
+/* the first icon is the one Explorer, the taskbar and Alt+Tab show */
+IDI_ANTSHELL ICON "shell_icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     ANT_VERSION_BIN
+PRODUCTVERSION  ANT_VERSION_BIN
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+	BLOCK "StringFileInfo"
+	BEGIN
+		/* U.S. English, Unicode */
+		BLOCK "040904B0"
+		BEGIN
+			VALUE "FileDescription",  "AntShell - Anthropoid Shell"
+			VALUE "FileVersion",      ANT_VERSION_STR
+			VALUE "InternalName",     "antshell"
+			VALUE "OriginalFilename", "antshell.exe"
+			VALUE "ProductName",      "AntShell"
+			VALUE "ProductVersion",   ANT_VERSION_STR
+			VALUE "Comments",         "Command line shell for Windows: sh syntax, fish-style TAB and suggestions"
+			VALUE "LegalCopyright",   "Copyright (C) Alberto"
+		END
+	END
+	BLOCK "VarFileInfo"
+	BEGIN
+		VALUE "Translation", 0x409, 1200
+	END
+END

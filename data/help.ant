@@ -1,0 +1,64 @@
+TAB             Complete files (commands in the 1st word and after | ; && || &)
+(SHIFT + TAB)   Previous option in the TAB menu
+(RIGHT / END)   Accept the gray suggestion from history (CTRL + RIGHT: one word)
+(UP / DOWN)     Command history; F7 lists it, F8 searches by the start, ALT + F7 clears
+(CTRL + V)      Paste the clipboard (1st line only; SHIFT + INSERT too); CTRL + INSERT copies the line
+(LEFT)          On an empty line: folders of this session, ENTER goes there (left-cd)
+
+CD              Change directory (CD alone: home, $HOME; CD ..  CD \  CD -: back to the previous one, $OLDPWD; / shows the current one)
+.. / DIR\ / ~   Implicit cd: a folder path alone on the line enters it
+PWD             Current folder (the built-in / does the same)
+LINK            Shortcuts from data\config.ant: NAME opens, NAME\ enters, NAME. opens and closes the shell (LINK -F edits)
+LS              List files (LS -A hidden, -L details, -H sizes, -1 one per line)
+CAT             Show file content (CAT -N numbers lines)
+TOUCH           Create file / update its date
+MK              Create files from the templates of data\mk.ant: MK main.c (hello world), MK main (empty); -F overwrites, -L lists
+MKDIR           Create directory (-P with parents)
+CP              Copy (-R folders)
+MV              Move / rename
+RM              Remove files (-R folders, -F force; no recycle bin)
+FIND            Find files: -NAME -TYPE -SIZE -EMPTY -MAXDEPTH -DELETE (quote the patterns)
+DU              Space the files take, in KiB (-S total, -H sizes like 1.5M, -A files, -D N)
+
+GREP            Lines that match (-I -N -V -C -L -R -F; . [a-z] * + ? ^ $ a|b)
+HEAD / TAIL     First / last lines (-N; TAIL -F follows)
+WC              Lines, words, bytes (-L -W -M -C)
+SORT            Sort lines (-R -N -U -F)
+UNIQ            Collapse repeated lines in a row (-C counts, -D repeated, -U single, -I)
+TEE             Copy the input to the output and to files (-A appends)
+ECHO            Print the words (ECHO -N: no newline)
++ - * / % ^ =   Calculator: infix (2+3, 10%3, 2^3^2, -(2+3), sqrt(16), abs(-5), round(x), log(x), ln(x), 2*pi, e^2) or RPN (2 3 +); redirected it prints plain text
+
+@               Open with Windows, no wait (@ alone: this folder)
+BG              Run a program in a hidden console, terminal free: BG youtube URL; -o sends the output to youtube_<pid>.txt instead of the console (SHOW then has nothing to show), -d disables the close button
+SHOW            Show the hidden console (with the prints) of a BG program without -o: SHOW pid (JOBS lists the pids), SHOW -h hides it again
+JOBS            List background jobs
+WAIT            Wait for background jobs: WAIT, WAIT %1 (code of the job in $?)
+PS              List the running processes: pid, parent, threads, memory (PS -F paths, -M by memory, -C name, -P pid)
+PKILL           End processes by name: PKILL name, PKILL -9 "chrome*", PKILL -F path part, PKILL -L only lists
+XARGS           Run a command with words from the input: XARGS cat, -N1 one at a time, -I{} replace, -0 NUL, -P2 parallel, -R, -T
+KILL            End processes: KILL pid, KILL -9 pid, KILL %1 (job); KILL -L lists signals
+SLEEP           Wait: SLEEP 0.5, 2m, 1h
+CORE            RAM, CPU, HD's
+
+HISTORY         Command log, data\history.ant (HISTORY N: last N lines, HISTORY ALL: everything, HISTORY CLEAR erases it)
+ALIAS           Aliases from data\config.ant (ALIAS name shows one, ALIAS -F edits the file)
+PATH            Folders where programs are looked for, from data\config.ant (PATH -F opens the file)
+EXPORT          EXPORT NAME=value sets an environment variable (alone: lists; NAME=value works too)
+UNSET           UNSET NAME removes it
+WHICH           What a name runs: alias, built-in, link, [path], PATH (WHICH -A: all)
+TRUE / FALSE    Do nothing: exit code 0 / 1 (for && and ||)
+
+a | b           Pipe: output of a goes into b
+a ; b           Run a, then b
+a && b          Run b only if a succeeded
+a || b          Run b only if a failed
+a &             Run a in background
+< > >>          Redirect input / output / append to file (/dev/null discards)
+2> 2>&1         Redirect errors to file / together with output
+$VAR $? ~ * ?   Expanded by the shell: variable, last exit code, home folder, file names
+
+.               (dot) Clear screen
+VER             Version and logo
+HELP            This list (HELP name or name --HELP: only the entry of that command)
+EXIT/NOP        Close the shell; EXIT N closes with code N (EXIT alone: code of the last command; NOP: 0)

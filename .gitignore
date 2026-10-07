@@ -1,0 +1,17 @@
+# build
+obj/
+*.o
+*.exe
+
+# archives and downloaded pages
+*.zip
+data/history.ant
+
+# brick game save
+bin/brick.dat
+
+# personal configuration (the shell creates a new one from the template if it is missing)
+data/config.ant
+
+# private instructions for Claude Code
+CLAUDE.md
