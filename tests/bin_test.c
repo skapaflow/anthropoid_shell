@@ -580,7 +580,7 @@ int wmain (int argc, wchar_t **argv) {
 	}
 
 
-	/* ---- pkill ---- */
+	/* ---- masterkill ---- */
 	{
 		static char got[1 << 16];
 		wchar_t src[MAX_PATH], copy[MAX_PATH], name[64], args[256];
@@ -596,50 +596,35 @@ int wmain (int argc, wchar_t **argv) {
 		CopyFileW(src, copy, FALSE);
 
 		if (spawn_sleeper(copy, &a) && spawn_sleeper(copy, &b)) {
-			sprintf(pid_a, "%lu ", a.dwProcessId);
-			sprintf(pid_b, "%lu ", b.dwProcessId);
-			swprintf(args, 256, L"-l %ls", name);
-			code = run(L"pkill", args, NULL, got, sizeof got);
-			check_true("pkill -l lists both with pid and name", code == 0 && strstr(got, pid_a) && strstr(got, pid_b) && strstr(got, name8));
-			swprintf(args, 256, L"-0 %ls", name);
-			code = run(L"pkill", args, NULL, got, sizeof got);
-			check_true("pkill -0 only counts, without killing", code == 0 && !*got && WaitForSingleObject(a.hProcess, 200) == WAIT_TIMEOUT);
-			code = run(L"pkill", name, NULL, got, sizeof got);
-			check_true("pkill by name: exits with 0 and silently", code == 0 && !*got);
-			check_true("pkill ended the 1st (143)", ended_with(&a, 143));
-			check_true("pkill ended the 2nd (143)", ended_with(&b, 143));
+			sprintf(pid_a, "(%lu)", a.dwProcessId);
+			sprintf(pid_b, "(%lu)", b.dwProcessId);
+			code = run(L"masterkill", name, NULL, got, sizeof got);
+			check_true("masterkill declares each kill with name and pid", code == 0 &&
+				strstr(got, "KILL") && strstr(got, name8) && strstr(got, pid_a) && strstr(got, pid_b));
+			check_true("masterkill ended the 1st (143)", ended_with(&a, 143));
+			check_true("masterkill ended the 2nd (143)", ended_with(&b, 143));
 		} else
-			check_true("pkill: could not open the test processes", false);
+			check_true("masterkill: could not open the test processes", false);
 
 		if (spawn_sleeper(copy, &c)) {
-			swprintf(args, 256, L"-9 \"%ls*\"", name);
-			code = run(L"pkill", args, NULL, got, sizeof got);
-			check_true("pkill -9 with a wildcard", code == 0 && !*got);
-			check_true("pkill -9 ends with 137", ended_with(&c, 137));
+			code = run(L"masterkill", L"ant_sleep", NULL, got, sizeof got);
+			check_true("masterkill matches by prefix (runtime -> RuntimeBroker)", code == 0 && strstr(got, "KILL") && strstr(got, name8));
+			check_true("masterkill prefix ends with 143", ended_with(&c, 143));
 		}
 		if (spawn_sleeper(copy, &c)) {
-			swprintf(args, 256, L"-s KILL -f %ls", name);
-			code = run(L"pkill", args, NULL, got, sizeof got);
-			check_true("pkill -s KILL -f matches by path", code == 0 && !*got);
-			check_true("pkill -s KILL ends with 137", ended_with(&c, 137));
+			swprintf(args, 256, L"\"%ls.EXE\"", name);
+			code = run(L"masterkill", args, NULL, got, sizeof got);
+			check_true("masterkill ignores case and accepts .exe", code == 0 && strstr(got, name8));
+			check_true("masterkill .EXE ends with 143", ended_with(&c, 143));
 		}
-		if (spawn_sleeper(copy, &c)) {
-			swprintf(args, 256, L"-l \"%ls.EXE\"", name);
-			code = run(L"pkill", args, NULL, got, sizeof got);
-			check_true("pkill ignores case and accepts .exe", code == 0 && strstr(got, name8));
-			TerminateProcess(c.hProcess, 1);
-			ended_with(&c, 1);
-		}
-		code = run(L"pkill", L"nome_que_nao_existe_zzz", NULL, got, sizeof got);
-		check_true("pkill with nobody by that name exits with 1", code == 1 && !*got);
-		code = run(L"pkill", L"-l bin_test", NULL, got, sizeof got);
-		check_true("pkill does not touch whoever started it (this test)", code == 1 && !*got);
-		code = run(L"pkill", L"-lf bin_test", NULL, got, sizeof got);
-		check_true("pkill -f also spares whoever started it", code == 1 && !*got);
-		code = run(L"pkill", L"", NULL, got, sizeof got);
-		check_true("pkill without a name", code == 2 && strstr(got, "usage: pkill"));
-		code = run(L"pkill", L"-FOO x", NULL, got, sizeof got);
-		check_true("pkill with an invalid signal", code == 2 && strstr(got, "FOO: invalid signal specification"));
+		code = run(L"masterkill", L"nome_que_nao_existe_zzz", NULL, got, sizeof got);
+		check_true("masterkill declares UNKNOWN and exits 1", code == 1 && strstr(got, "UNKNOWN"));
+		code = run(L"masterkill", L"bin_test", NULL, got, sizeof got);
+		check_true("masterkill spares whoever started it (UNKNOWN, code 1)", code == 1 && strstr(got, "UNKNOWN"));
+		code = run(L"masterkill", L"", NULL, got, sizeof got);
+		check_true("masterkill with no name lists the processes", code == 0 && strstr(got, "bin_test"));
+		code = run(L"masterkill", L"--help", NULL, got, sizeof got);
+		check_true("masterkill --help shows the usage", code == 0 && strstr(got, "usage: masterkill"));
 		DeleteFileW(copy);
 	}
 

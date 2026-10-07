@@ -15,7 +15,7 @@ CC     = clang
 CFLAGS = -O2 -Wall $(if $(WERROR),-Werror)
 
 # unix-style programs: wmain, shared bin/common.h
-UNIX_PROGS = ls cat mkdir rm cp mv touch head tail wc sort grep kill pwd sleep tee uniq du find ps pkill xargs core color show
+UNIX_PROGS = ls cat mkdir rm cp mv touch head tail wc sort grep kill pwd sleep tee uniq du find ps masterkill xargs core color show
 # stand-alone tools and games: one .c each, no common.h
 TOOL_PROGS = cube pong brick dump
 

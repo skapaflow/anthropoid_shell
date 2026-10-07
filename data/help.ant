@@ -35,7 +35,7 @@ SHOW            Show the hidden console (with the prints) of a BG program withou
 JOBS            List background jobs
 WAIT            Wait for background jobs: WAIT, WAIT %1 (code of the job in $?)
 PS              List the running processes: pid, parent, threads, memory (PS -F paths, -M by memory, -C name, -P pid)
-PKILL           End processes by name: PKILL name, PKILL -9 "chrome*", PKILL -F path part, PKILL -L only lists
+MASTERKILL      End processes whose name STARTS WITH the term and declare each: MASTERKILL runtime (all RuntimeBroker); no term lists the processes
 XARGS           Run a command with words from the input: XARGS cat, -N1 one at a time, -I{} replace, -0 NUL, -P2 parallel, -R, -T
 KILL            End processes: KILL pid, KILL -9 pid, KILL %1 (job); KILL -L lists signals
 SLEEP           Wait: SLEEP 0.5, 2m, 1h

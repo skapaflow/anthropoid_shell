@@ -581,7 +581,7 @@ static inline int text_width (const wchar_t *s) {
 	return w;
 }
 
-/* ---------- name patterns (find, pkill) ---------- */
+/* ---------- name patterns (find, masterkill) ---------- */
 
 /* * ? [abc] [a-z] [!a] [^a]; case does not matter (Windows names) */
 /* [abc] [a-z] [!a] [^a] starting at p (after the '['); returns where the set ends, or NULL if it has no ] */
