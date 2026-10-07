@@ -34,10 +34,14 @@ typedef struct {
 	bool literal;   /* inside single quotes: no $VAR */
 } ENTRY;
 
-/* the value the variable had before [export] (NULL: it did not exist) */
+/* a variable of [export]: what it had before (NULL: it did not exist) and what [export] put in it */
 typedef struct {
 	wchar_t *name;
 	wchar_t *old;
+	wchar_t *line;    /* the value as written in the file: a reload compares it to see if the line changed */
+	bool literal;
+	wchar_t *applied; /* the value set; the session may have changed the variable since */
+	bool keep;        /* during a reload: the line did not change */
 } SAVED;
 
 static ENTRY  *entries;
@@ -378,45 +382,100 @@ int ant_config_path (wchar_t *out, int max) {
 
 /* ---------- [export] ---------- */
 
-/* puts the variables back to what they were before the last [export] */
-static void exports_restore (void) {
+static void saved_free (SAVED *s) {
 
-	for (int i = nsaved - 1; i >= 0; i--) {
-		SetEnvironmentVariableW(saved[i].name, saved[i].old);
-		free(saved[i].name);
-		free(saved[i].old);
-	}
-	free(saved);
-	saved = NULL;
-	nsaved = 0;
+	free(s->name);
+	free(s->old);
+	free(s->line);
+	free(s->applied);
 }
 
-/* applies [export] in file order (a value can use a variable defined above it) */
-static void exports_apply (void) {
+static SAVED *saved_find (const wchar_t *name) {
+
+	for (int i = 0; i < nsaved; i++)
+		if (!_wcsicmp(saved[i].name, name))
+			return &saved[i];
+	return NULL;
+}
+
+/* does the variable still have the value [export] gave it? (false: the session changed or removed it) */
+static bool untouched (const SAVED *s) {
+
+	static wchar_t now[VALUE_MAX];
+	DWORD m = GetEnvironmentVariableW(s->name, now, VALUE_MAX);
+
+	if (!s->applied || m >= VALUE_MAX)
+		return false;
+	if (m == 0)
+		now[0] = 0;
+	return !wcscmp(now, s->applied);
+}
+
+/*
+ * Brings the environment in line with [export] after a load. Only what changed in the
+ * file is touched, so an export typed in the session survives the reload that follows
+ * an edit of another line:
+ *   - a line that did not change: nothing (the variable keeps what the session did);
+ *   - a line that changed or is new: the new value, worked out from the value the
+ *     variable had before [export], as on the first load ($PATH;x does not pile up);
+ *   - a line that left the file: back to the value before [export], unless the
+ *     session changed the variable since.
+ * Lines are applied in file order (a value can use a variable defined above it).
+ */
+static void exports_sync (void) {
 
 	static wchar_t value[VALUE_MAX];
+	int n = 0;
+
+	for (int i = 0; i < nsaved; i++) {
+		SAVED s = saved[i];
+		int k = find(CONFIG_EXPORT, s.name, wcslen(s.name));
+
+		s.keep = k >= 0 && s.line && entries[k].literal == s.literal && !wcscmp(entries[k].value, s.line);
+		if (!s.keep && (k >= 0 || untouched(&s)))
+			SetEnvironmentVariableW(s.name, s.old);
+		if (k < 0) {
+			saved_free(&s);
+			continue;
+		}
+		if (!s.keep) {
+			/* applied again below, with the same 'old' */
+			free(s.line);
+			free(s.applied);
+			s.line = s.applied = NULL;
+		}
+		saved[n++] = s;
+	}
+	nsaved = n;
 
 	for (int k = 0; k < count; k++) {
-		SAVED *grown;
-		DWORD m;
+		SAVED *s;
 
 		if (entries[k].section != CONFIG_EXPORT)
 			continue;
-		if (!(grown = realloc(saved, sizeof(SAVED) * (nsaved + 1))))
-			return;
-		saved = grown;
-		saved[nsaved].name = _wcsdup(entries[k].name);
-		saved[nsaved].old = NULL;
-		m = GetEnvironmentVariableW(entries[k].name, NULL, 0);
-		if (m && (saved[nsaved].old = malloc(sizeof(wchar_t) * m)))
-			GetEnvironmentVariableW(entries[k].name, saved[nsaved].old, m);
-		if (!saved[nsaved].name) {
-			free(saved[nsaved].old);
-			return;
+		if ((s = saved_find(entries[k].name)) && s->keep)
+			continue;
+		if (!s) {
+			SAVED *grown = realloc(saved, sizeof(SAVED) * (nsaved + 1));
+			DWORD m;
+
+			if (!grown)
+				return;
+			saved = grown;
+			s = &saved[nsaved];
+			memset(s, 0, sizeof *s);
+			if (!(s->name = _wcsdup(entries[k].name)))
+				return;
+			m = GetEnvironmentVariableW(entries[k].name, NULL, 0);
+			if (m && (s->old = malloc(sizeof(wchar_t) * m)))
+				GetEnvironmentVariableW(entries[k].name, s->old, m);
+			nsaved++;
 		}
-		nsaved++;
 		value_of(k, value, VALUE_MAX);
 		SetEnvironmentVariableW(entries[k].name, value);
+		s->line = _wcsdup(entries[k].value);
+		s->literal = entries[k].literal;
+		s->applied = _wcsdup(value);
 	}
 }
 
@@ -438,8 +497,13 @@ static bool data_file (const wchar_t *name, wchar_t *out, int max) {
 	return true;
 }
 
+/* ANT_CONFIG_FILE puts the file somewhere else (the tests use it) */
 bool ant_config_file (wchar_t *out, int max) {
 
+	DWORD n = GetEnvironmentVariableW(L"ANT_CONFIG_FILE", out, max);
+
+	if (n > 0 && n < (DWORD) max)
+		return true;
 	return data_file(L"config.ant", out, max);
 }
 
@@ -663,7 +727,7 @@ bool ant_config_load (void) {
 			/* no file: empty configuration */
 			bool changed = !loaded || count > 0;
 			ant_config_parse(NULL);
-			exports_restore();
+			exports_sync();
 			memset(&stamp, 0, sizeof stamp);
 			size = 0;
 			loaded = true;
@@ -679,8 +743,7 @@ bool ant_config_load (void) {
 	text = read_text(path);
 	ant_config_parse(text);
 	free(text);
-	exports_restore();
-	exports_apply();
+	exports_sync();
 	loaded = true;
 	return true;
 }

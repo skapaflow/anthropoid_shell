@@ -5,7 +5,6 @@
 #include <windows.h>
 
 #include "console.h"
-#include "../shell/shell.h"
 
 int get_console_width (void) {
 
@@ -150,35 +149,64 @@ const char font_char[ASCII_LEN][ASCII_SIZE] = {
 
 
 
-void print_big_text (const char *str, char type, int color) {
+/* the drawing characters, in UTF-8 (the shell's code page), so they look the same whatever the console's original one */
+#define BLOCK_FULL   "\xe2\x96\x88" /* █ */
+#define SHADE_LIGHT  "\xe2\x96\x91" /* ░ */
+#define SHADE_MEDIUM "\xe2\x96\x92" /* ▒ */
+#define SHADE_DARK   "\xe2\x96\x93" /* ▓ */
+#define BOX_H        "\xe2\x94\x80" /* ─ */
+#define BOX_V        "\xe2\x94\x82" /* │ */
+#define BOX_TL       "\xe2\x94\x8c" /* ┌ */
+#define BOX_TR       "\xe2\x94\x90" /* ┐ */
+#define BOX_BL       "\xe2\x94\x94" /* └ */
+#define BOX_BR       "\xe2\x94\x98" /* ┘ */
 
-	int c = 0;
+/* str in the 6x6 font: 'cell' (UTF-8) in the color where the font has a 1; a run of cells goes in one write */
+void print_big_text (const char *str, const char *cell, int color) {
+
 	const int lot = 6;
 	const int begin = 32;
-	/*{{{*/
-	SetConsoleOutputCP(ant_saved_codepage);
-	/*}}}*/
+	int len = strlen(str), cell_len = strlen(cell);
+	char *run = malloc(len * lot * cell_len + 1);
+
+	if (!run)
+		return;
 	for (int y = 0; y < lot; y++) {
+		int n = 0;
+
 		printf(" ");
-		for (int i = 0; i < (int) strlen(str); i++) {
-			c = (str[i] - begin);
+		for (int i = 0; i < len; i++) {
+			int c = (unsigned char) str[i] - begin;
+
+			if (c < 0 || c >= ASCII_LEN)
+				c = 0;
 			for (int x = 0; x < lot; x++) {
-				if (font_char[c][x + (y * lot)] == '1')
-					print(color, "%c", type);
-				else
-					printf(" ");
+				if (font_char[c][x + (y * lot)] == '1') {
+					memcpy(run + n, cell, cell_len);
+					n += cell_len;
+					continue;
+				}
+				if (n) {
+					run[n] = 0;
+					print(color, "%s", run);
+					n = 0;
+				}
+				printf(" ");
 			}
+		}
+		if (n) {
+			run[n] = 0;
+			print(color, "%s", run);
 		}
 		printf("\n");
 	}
-	/*{{{*/
-	SetConsoleOutputCP(CP_UTF8);
-	/*}}}*/
+	free(run);
 }
 
 void ant_logo (int width) {
 
-	char skull[] = "00000000124442100000000"
+	static const char skull[] =
+	               "00000000124442100000000"
 	               "00000014444444441000000"
 	               "00000144444444444100000"
 	               "00001444444444444410000"
@@ -202,40 +230,39 @@ void ant_logo (int width) {
 	               "44431000144444100013444"
 	               "14300000012321000000341";
 
-	/*{{{*/
-	SetConsoleOutputCP(ant_saved_codepage);
-	/*}}}*/
+	/* each digit of the skull is a shade, drawn twice (a cell is twice as tall as it is wide) */
+	static const char *shade[] = { " ", SHADE_LIGHT, SHADE_MEDIUM, SHADE_DARK, BLOCK_FULL };
+	enum { SKULL_W = 23, BAR_W = 39 };
+	char bar[BAR_W * 3 + 1], row[SKULL_W * 2 * 3 + 1], pad[64];
+	int n;
 
-	int i = 0;
-	char bar[50] = {0};
-	char vetor[] = "                                        ";
-	
-	while (i < 39)
-		bar[i++] = (char) 196;
-	vetor[width+2] = 0; 
-	
-	printf("\n%s%c%s%c\n%s%c        ANTHROPOID SHELL [v2025]       %c\n%s%c%s%c\n",
-		vetor, 218, bar, 191, vetor, 179, 179, vetor, 192, bar, 217);
+	if (width < 0)
+		width = 0;
+	if (width > (int) sizeof pad - 3)
+		width = (int) sizeof pad - 3;
 
-	int j = 0, cores[6] = {32,176,177,178,219};
-	char string[600] = {0};
-	char space[] = "                                        ";
-	space[width] = 0;
+	for (n = 0; n < BAR_W; n++)
+		memcpy(bar + n * 3, BOX_H, 3);
+	bar[BAR_W * 3] = 0;
+	memset(pad, ' ', width + 2);
+	pad[width + 2] = 0;
+	printf("\n%s" BOX_TL "%s" BOX_TR "\n%s" BOX_V "        ANTHROPOID SHELL [v2025]       " BOX_V "\n%s" BOX_BL "%s" BOX_BR "\n",
+		pad, bar, pad, pad, bar);
 
-	strcpy(string, skull);
-
-	/* draw ASCII code */
-	while (string[j]) {
-		for (i = 0; i < 46; i++) {
-			bar[i] = cores[string[j++]-48];
-			i++; bar[i] = bar[i-1];
+	pad[width] = 0;
+	for (int j = 0; skull[j]; ) {
+		n = 0;
+		for (int i = 0; i < SKULL_W; i++, j++) {
+			const char *s = shade[skull[j] - '0'];
+			int k = strlen(s);
+			memcpy(row + n, s, k);
+			memcpy(row + n + k, s, k);
+			n += 2 * k;
 		}
-		printf("%s%s\n", space, bar);
+		row[n] = 0;
+		printf("%s%s\n", pad, row);
 	}
 	printf("\n");
-	/*{{{*/
-	SetConsoleOutputCP(CP_UTF8);
-	/*}}}*/
 }
 
 /* error message on the error output (red in the console), so "2>" can redirect it */

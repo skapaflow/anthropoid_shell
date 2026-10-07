@@ -1,7 +1,8 @@
 /*************************************************************
  * Test of the config module (src/config/config.c): sections,     *
  * values, warnings, $VAR and the conversion of the old files. *
- * No screen and no file (ant_config_parse takes the text).  *
+ * No screen; ant_config_parse takes the text, and the       *
+ * [export] reload cases use a file in %TEMP%.               *
  *************************************************************/
 
 #include <stdio.h>
@@ -59,6 +60,41 @@ static const wchar_t *expand (const wchar_t *in) {
 	static wchar_t out[4096];
 	ant_config_expand(in, out, 4096);
 	return out;
+}
+
+/* the config.ant of the reload cases (ANT_CONFIG_FILE points at it) */
+static wchar_t config_path[MAX_PATH];
+
+/* writes the file; each version gets a later write time, so ant_config_load always sees the change */
+static void write_config (const char *text) {
+
+	static int version = 0;
+	FILE *f = _wfopen(config_path, L"wb");
+	HANDLE h;
+
+	if (f) {
+		fputs(text, f);
+		fclose(f);
+	}
+	h = CreateFileW(config_path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	if (h != INVALID_HANDLE_VALUE) {
+		ULARGE_INTEGER u;
+		FILETIME t;
+
+		u.QuadPart = 130000000000000000ULL + (ULONGLONG) ++version * 10000000ULL;
+		t.dwLowDateTime = u.LowPart;
+		t.dwHighDateTime = u.HighPart;
+		SetFileTime(h, NULL, NULL, &t);
+		CloseHandle(h);
+	}
+}
+
+/* the variable in the environment (NULL: it does not exist or is empty) */
+static const wchar_t *env (const wchar_t *name) {
+
+	static wchar_t out[4096];
+	DWORD m = GetEnvironmentVariableW(name, out, 4096);
+	return (m > 0 && m < 4096) ? out : NULL;
 }
 
 int main (void) {
@@ -177,6 +213,44 @@ int main (void) {
 
 	ant_config_parse(NULL);
 	check_int("empty", 0, ant_config_count(CONFIG_LINK));
+
+	/* ---------- [export] when the file is read again ---------- */
+	GetTempPathW(MAX_PATH, config_path);
+	wcscat(config_path, L"ant_config_test.ant");
+	DeleteFileW(config_path);                   /* nothing left over from an earlier run */
+	SetEnvironmentVariableW(L"ANT_CONFIG_FILE", config_path);
+	SetEnvironmentVariableW(L"ANT_E1", L"before");
+	SetEnvironmentVariableW(L"ANT_E2", NULL);
+	SetEnvironmentVariableW(L"ANT_E3", L"base");
+
+	write_config("[export]\nANT_E1 = one\nANT_E2 = two\nANT_E3 = $ANT_E3;x\n");
+	check_int("load: the file is read", 1, ant_config_load());
+	check("load: [export] sets the variable", L"one", env(L"ANT_E1"));
+	check("load: $VAR in [export]", L"base;x", env(L"ANT_E3"));
+
+	SetEnvironmentVariableW(L"ANT_E1", L"session");   /* an export typed in the session */
+	write_config("[export]\nANT_E1 = one\nANT_E2 = two\nANT_E3 = $ANT_E3;x\n[alias]\nll = ls -l\n");
+	check_int("reload: an edit in another section is read", 1, ant_config_load());
+	check("an export of the session survives when its line did not change", L"session", env(L"ANT_E1"));
+	check("an unchanged $VAR;x line does not pile up", L"base;x", env(L"ANT_E3"));
+
+	write_config("[export]\nANT_E1 = uno\nANT_E2 = two\nANT_E3 = $ANT_E3;y\n");
+	ant_config_load();
+	check("a line that changed is applied again", L"uno", env(L"ANT_E1"));
+	check("a changed $VAR;x line starts from the value before [export]", L"base;y", env(L"ANT_E3"));
+
+	SetEnvironmentVariableW(L"ANT_E1", L"mine");
+	write_config("[export]\nANT_E3 = $ANT_E3;y\n");
+	ant_config_load();
+	check("a line that left the file: the session's value stays", L"mine", env(L"ANT_E1"));
+	check("a line that left the file: back to the value before (it did not exist)", NULL, env(L"ANT_E2"));
+
+	write_config("[alias]\nll = ls\n");
+	ant_config_load();
+	check("the last line leaves: back to the value before [export]", L"base", env(L"ANT_E3"));
+
+	DeleteFileW(config_path);
+	SetEnvironmentVariableW(L"ANT_CONFIG_FILE", NULL);
 
 	printf("config: %d of %d cases passed\n", total - failures, total);
 	return failures ? 1 : 0;

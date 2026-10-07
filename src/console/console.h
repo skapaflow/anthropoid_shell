@@ -29,7 +29,7 @@ extern void set_cursor_type (bool, bool);
 extern int print (int, const char *, ...);
 extern void ant_error (const wchar_t *, ...);
 extern void ant_write (const wchar_t *);
-extern void print_big_text (const char *, char, int);
+extern void print_big_text (const char *, const char *, int);
 extern void ant_logo (int);
 
 #endif

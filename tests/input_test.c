@@ -1793,6 +1793,35 @@ static void run_args_cases (const wchar_t *term) {
 	RemoveDirectoryW(dir);
 }
 
+/* the logo and the big digits of the calculator are written in UTF-8, whatever code page the console started in */
+static void run_drawing_cases (const wchar_t *term) {
+
+	PROCESS_INFORMATION pi;
+	UINT cp = GetConsoleOutputCP();
+	wchar_t f[MAX_PATH], cmd[MAX_PATH + 16];
+
+	GetTempPathW(MAX_PATH, f);
+	wcscat(f, L"ant_ver_test.txt");
+	DeleteFileW(f);                             /* nothing left over from an earlier run */
+
+	/* a console that starts in UTF-8 (the "Use Unicode UTF-8" option of Windows): CP437 bytes came out as U+FFFD */
+	SetConsoleOutputCP(CP_UTF8);
+	if (start_term(term, NULL, &pi)) {
+		run(L"ver");
+		check_true("ver in a UTF-8 console: the box of the logo", below_has(L"\x250C\x2500\x2500"), "no box corner under the prompt");
+		check_true("ver in a UTF-8 console: the shades of the skull", below_has(L"\x2593\x2593") && below_has(L"\x2591\x2591"),
+			"no shade characters");
+		run(L"2+3");
+		check_true("calculator in a UTF-8 console: the big digits are full blocks", below_has(L"\x2588\x2588\x2588"), "no full blocks");
+		swprintf(cmd, MAX_PATH + 16, L"ver > \"%ls\"", f);
+		run(cmd);
+		check_file("ver > file: the logo in UTF-8", f, L"\x250C\x2500\x2500");
+		stop_term(&pi);
+	}
+	SetConsoleOutputCP(cp);
+	DeleteFileW(f);
+}
+
 static int inner (const wchar_t *term, const wchar_t *report_path) {
 
 	PROCESS_INFORMATION pi;
@@ -1847,6 +1876,7 @@ static int inner (const wchar_t *term, const wchar_t *report_path) {
 	check_true("nop 5 closes with 5", exit_code_of(term, L"nop 5") == 5, NULL);
 
 	run_args_cases(term);
+	run_drawing_cases(term);
 
 	/* pager session: a fixed tree, independent of how the project organizes its folders */
 	{

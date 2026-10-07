@@ -309,6 +309,9 @@ vid = D:\Videos
 - `$VAR` and `${VAR}` become the value of the variable (in `[path]`, `[export]` and `[link]`);
   inside `'single quotes'` the value stays literal. `[alias]` stays as it is.
 - `"quotes"` keep spaces at the start and end of the value.
+- When the file is read again, only the `[export]` lines that changed are applied again: an
+  `export` typed in the session survives an edit of another line. A line taken out of the
+  file puts the variable back to what it was before, unless the session changed it.
 - A repeated name: the first one wins. Lines with errors are reported when the shell opens,
   with the line number (`config.ant, line 5: missing '=' in "..."`).
 - The file is UTF-8 (ANSI is also accepted).

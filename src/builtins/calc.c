@@ -51,7 +51,7 @@ int ant_cmd_calc (char *str) {
 		printf("%s\n", text);
 	} else if (big_text_fits(text)) {
 		printf("\n");
-		print_big_text(text, '\xdb', CLEAR|GREEN);
+		print_big_text(text, "\xe2\x96\x88", CLEAR|GREEN); /* █ */
 	} else {
 		printf("\n");
 		print(CLEAR|GREEN, " %s\n", text);
