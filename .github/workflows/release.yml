@@ -111,11 +111,50 @@ jobs:
           mingw32-make -k bin WERROR=1
 
       # The tests first, so a package is never attached to a release that does not pass them.
+      #
+      # THE FAILURES ARE PULLED OUT OF THE LOG AND RAISED AS ANNOTATIONS. The log of a run needs
+      # a login to read; an annotation is on the run page and in the public API. So each FAIL
+      # (with the expected/got lines under it and the test program it came from) becomes one, a
+      # notice lists the suites that passed, and the end of the log comes last, because a test
+      # that hangs or crashes leaves no FAIL line - only a log that stops.
       - name: tests
-        shell: cmd
+        shell: pwsh
         run: |
-          echo ::add-matcher::.github/clang.json
-          mingw32-make -k test WERROR=1
+          $ErrorActionPreference = 'Continue'
+          Write-Output '::add-matcher::.github/clang.json'
+
+          mingw32-make -k test WERROR=1 2>&1 | Tee-Object -FilePath test.log
+          $rc = $LASTEXITCODE
+
+          function Escape($text) {
+            $text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          }
+
+          $lines  = @(Get-Content test.log)
+          $suite  = ''
+          $fails  = 0
+          $passed = @()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            if ($line -match '^(tests\\\S+\.exe)') { $suite = $Matches[1] }
+            if ($line -match 'passed|^SKIP') { $passed += $line.Trim() }
+            if ($line -match '^FAIL') {
+              $fails++
+              if ($fails -le 8) {
+                $last = [Math]::Min($i + 6, $lines.Count - 1)
+                $text = ($lines[$i..$last] -join "`n")
+                Write-Output ("::error title=FAIL in {0}::{1}" -f $suite, (Escape $text))
+              }
+            }
+          }
+          if ($passed.Count) {
+            Write-Output ("::notice title=suites that finished::{0}" -f (Escape ($passed -join "`n")))
+          }
+          if ($rc -ne 0) {
+            $tail = ($lines | Select-Object -Last 25) -join "`n"
+            Write-Output ("::error title=exit code {0}, {1} FAIL line(s); the end of the log::{2}" -f $rc, $fails, (Escape $tail))
+          }
+          exit $rc
 
       - name: package
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
