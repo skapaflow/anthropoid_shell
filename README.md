@@ -83,6 +83,7 @@ make run      builds and opens the shell
 make test     runs all the tests
 make clean    deletes the objects, recicon.res and the executables
 make icon     only builds the icon and version info (icon\recicon.rc → obj\recicon.res)
+make dist     builds everything and packs antshell-win64.zip: antshell.exe, the programs of bin\ and data\help.ant, mk.ant
 make bin      builds the programs in bin\ through bin\Makefile (inside bin\: `make -j4`, `make ls.exe`, `make note-test`, `make clean`)
 ```
 
@@ -442,6 +443,9 @@ sits next to its `.c`. Code, comments and messages are in English.
   `bin\Makefile` (the only Makefile of the tree).
 - Run `make test` before sending a change. The tests check the text of the messages, so a
   changed message means a changed test.
+- The `release` workflow (`.github\workflows\release.yml`) builds with `WERROR=1` (warnings are
+  errors; try `make WERROR=1` locally) and runs `make test` on every push and pull request. Pushing
+  a tag such as `v1.0` also packs the package with `make dist` and attaches it to a draft release.
 - `data\config.ant`, `data\history.ant` and `bin\brick.dat` are personal and ignored by
   git: do not add them.
 

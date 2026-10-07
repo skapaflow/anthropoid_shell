@@ -15,3 +15,7 @@ data/config.ant
 
 # private instructions for Claude Code
 CLAUDE.md
+
+# release package (make dist)
+dist/
+antshell-*.zip

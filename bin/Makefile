@@ -12,7 +12,7 @@
 SHELL = cmd.exe
 
 CC     = clang
-CFLAGS = -O2 -Wall
+CFLAGS = -O2 -Wall $(if $(WERROR),-Werror)
 
 # unix-style programs: wmain, shared bin/common.h
 UNIX_PROGS = ls cat mkdir rm cp mv touch head tail wc sort grep kill pwd sleep tee uniq du find ps pkill xargs core color show

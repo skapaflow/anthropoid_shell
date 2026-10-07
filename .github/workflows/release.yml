@@ -1,0 +1,158 @@
+# On every push to main and every pull request: builds everything with warnings as errors and
+# runs the tests, and stops there. When a tag is pushed it also packs the Windows package and
+# attaches it to a GitHub Release.
+#
+# Publishing is two commands:
+#
+#     git tag v1.0
+#     git push --tags
+#
+# The release is created as a DRAFT, so the notes can be written before anyone can download it.
+# Review it on the Releases page and press "Publish release".
+#
+# This workflow does not describe the package. It calls `make dist`, the same command used by
+# hand, so the list of what a person downloads lives in exactly one place (the Makefile).
+#
+# The toolchain is llvm-mingw, in the msvcrt build, which is the one the project is developed
+# with. It is the only thing here that has to be kept current by hand: LLVM_MINGW_VERSION below
+# is a release tag of https://github.com/mstorsjo/llvm-mingw/releases (a bare 404 in the
+# download step means the tag was removed or mistyped).
+#
+# The tests drive antshell.exe through hidden consoles and a ConPTY, so they need a Windows
+# session with a desktop; the runner has one. If they ever prove flaky on the runner, the
+# first number to raise is the `Sleep` in settle() in tests/input_test.c.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:      # so the packaging can be exercised without cutting a release
+
+permissions:
+  contents: write         # attaching a file to a release is a write
+
+env:
+  LLVM_MINGW_VERSION: '20260922'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # clang, windres and mingw32-make all come in the llvm-mingw zip (about 165 MB), so one
+      # download is the whole toolchain. It is cached under the version number: a run that finds
+      # it skips the download.
+      - name: cache the toolchain
+        id: llvm
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm-mingw
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-msvcrt
+
+      - name: llvm-mingw
+        if: steps.llvm.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $tmp = "$env:RUNNER_TEMP"
+
+          # Invoke-WebRequest renders a progress bar into a non-interactive host and spends most
+          # of its time doing it. Off, this is seconds rather than minutes.
+          $ProgressPreference = 'SilentlyContinue'
+
+          $name = "llvm-mingw-$env:LLVM_MINGW_VERSION-msvcrt-x86_64"
+          $url  = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_VERSION/$name.zip"
+
+          # The cause goes first and the advice second: a 404 and a refused connection must not
+          # come out word for word the same.
+          try { Invoke-WebRequest -Uri $url -OutFile "$tmp\llvm.zip" }
+          catch {
+            throw "Downloading llvm-mingw failed: $($_.Exception.Message)`n" +
+                  "  url: $url`n" +
+                  "  If that is a 404, check LLVM_MINGW_VERSION at the top of this workflow " +
+                  "against the releases page of mstorsjo/llvm-mingw."
+          }
+
+          Expand-Archive "$tmp\llvm.zip" -DestinationPath $tmp -Force
+          Move-Item "$tmp\$name" "C:\llvm-mingw"
+
+          foreach ($tool in 'clang.exe', 'windres.exe', 'mingw32-make.exe') {
+            if (-not (Test-Path "C:\llvm-mingw\bin\$tool")) {
+              throw "llvm-mingw unpacked, but bin\$tool is not there - the archive layout has changed."
+            }
+          }
+
+      - name: put the toolchain on the PATH
+        shell: pwsh
+        run: '"C:\llvm-mingw\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+
+      - name: toolchain versions
+        shell: cmd
+        run: |
+          clang --version
+          mingw32-make --version
+
+      # WERROR=1 reaches bin\ as well. A warning is cheapest to deal with the day it arrives.
+      #
+      # THE MATCHER TURNS CLANG'S OWN LINES INTO ANNOTATIONS (.github/clang.json), pinned to the
+      # file and line on the commit or the pull request: a warning is read where it was written,
+      # not dug out of a log. -k keeps make going past the first file that fails, so one run names
+      # every file with something to fix.
+      - name: build
+        shell: cmd
+        run: |
+          echo ::add-matcher::.github/clang.json
+          mingw32-make -k WERROR=1
+          if errorlevel 1 exit /b 1
+          mingw32-make -k bin WERROR=1
+
+      # The tests first, so a package is never attached to a release that does not pass them.
+      - name: tests
+        shell: cmd
+        run: |
+          echo ::add-matcher::.github/clang.json
+          mingw32-make -k test WERROR=1
+
+      - name: package
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: cmd
+        run: mingw32-make dist
+
+      # THE VERSION COMES FROM THE TAG, and it is the only place a released build is named. The
+      # banner of `ver` carries a year of its own, but a file named after a constant somebody
+      # forgot to raise is worse than one named after the tag that actually produced it.
+      - name: name the archive after the tag
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: Rename-Item antshell-win64.zip "antshell-$env:GITHUB_REF_NAME-win64.zip"
+
+      # A manual run has no release to attach to, so the package is kept as a build artifact
+      # (Actions > the run > Artifacts). On a tag it is kept too, next to the draft release.
+      - name: keep the package as an artifact
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: antshell-win64
+          path: antshell-*-win64.zip
+          if-no-files-found: error
+
+      - name: attach it to the release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: antshell-*-win64.zip
+          draft: true         # so the notes can be written before anyone can download it
+          body: |
+            Unzip anywhere and run `antshell.exe`. Nothing to install: it is a single
+            executable plus the programs in `bin\` (`ls`, `cat`, `grep`...), and the C runtime
+            it needs is part of Windows 10 and 11.
+
+            The first run creates `data\config.ant`, with the `bin\` folder already in
+            `[path]`. Type `help` to see what is there.
+
+            Windows will say **"Windows protected your PC"** the first time, because the
+            executables are not signed with a paid certificate. *More info* → *Run anyway*.
