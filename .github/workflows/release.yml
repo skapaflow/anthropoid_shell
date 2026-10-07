@@ -49,7 +49,7 @@ jobs:
       # it skips the download.
       - name: cache the toolchain
         id: llvm
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\llvm-mingw
           key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-msvcrt
@@ -145,14 +145,14 @@ jobs:
       # (Actions > the run > Artifacts). On a tag it is kept too, next to the draft release.
       - name: keep the package as an artifact
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: antshell-win64
           path: antshell-*-win64.zip
           if-no-files-found: error
 
       - name: attach it to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: antshell-*-win64.zip
