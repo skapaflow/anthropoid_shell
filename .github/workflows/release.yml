@@ -112,11 +112,11 @@ jobs:
 
       # The tests first, so a package is never attached to a release that does not pass them.
       #
-      # They run in two halves. The unit half links the module under test and needs no console, so it
-      # gates the release. The console half drives antshell.exe through hidden consoles and a ConPTY;
-      # a runner's console host is not the one on a development machine (its window has another
-      # height, and the one of the first runs read emoji back as U+FFFD), so it reports its failures
-      # without blocking, until it has proved itself over a few runs. Remove `continue-on-error` then.
+      # They run in two halves, and both gate the release. The unit half links the module under test
+      # and needs no console. The console half drives antshell.exe through hidden consoles and a
+      # ConPTY; a runner's console host is not the one on a development machine (its window has
+      # another height, and the one of the first runs read emoji back as U+FFFD), so input_test
+      # probes the console first and adapts to it.
       #
       # THE FAILURES ARE PULLED OUT OF THE LOG AND RAISED AS ANNOTATIONS (.github/run-tests.ps1):
       # the log of a run needs a login to read, an annotation does not.
@@ -126,7 +126,6 @@ jobs:
 
       - name: tests (console)
         shell: pwsh
-        continue-on-error: true
         run: ./.github/run-tests.ps1 test-console
 
       - name: package
