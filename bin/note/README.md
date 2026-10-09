@@ -64,6 +64,8 @@ note [file[:line[:column]]]
 | `Ctrl+A` | Select all |
 | `Shift` + arrows / `Home` / `End` / `PgUp` / `PgDn` | Select |
 | `Ctrl+←` `Ctrl+→` | Move by word |
+| `Alt+←` `Alt+→` | Start (like `Home`) / end of the line |
+| `Alt+↑` `Alt+↓` | Previous / next blank line, paragraph by paragraph (vim's `{` `}`) |
 | `Ctrl+Backspace` `Ctrl+Delete` | Delete a word |
 | `Tab` `Shift+Tab` | Indent / unindent the selected lines |
 | `Home` | First non-blank character, then column 1 |

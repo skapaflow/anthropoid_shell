@@ -463,14 +463,39 @@ static void move_home (void) {
 	ed.cx = ed.cx == first ? 0 : first;
 }
 
+/* a line with nothing but blanks */
+static bool blank_line (int y) {
+
+	const LINE *l = &ed.buf.lines[y];
+	int i;
+
+	for (i = 0; i < l->len; i++)
+		if (l->s[i] != L' ' && l->s[i] != L'\t')
+			return false;
+	return true;
+}
+
+/* Alt+↑ / Alt+↓: to the blank line before / after the paragraph (vim's { and }) */
+static void move_paragraph (int dir) {
+
+	int y = ed.cy, last = ed.buf.count - 1;
+
+	while (y + dir >= 0 && y + dir <= last && blank_line(y))
+		y += dir;
+	while (y + dir >= 0 && y + dir <= last && !blank_line(y))
+		y += dir;
+	ed.cy = y;
+	ed.cx = dir > 0 && !blank_line(y) ? LN->len : 0;
+}
+
 /* cursor keys; Shift extends the selection. Returns true for vertical moves (they keep want_col) */
-static bool move_key (WORD vk, bool ctrl, bool shift) {
+static bool move_key (WORD vk, bool ctrl, bool alt, bool shift) {
 
 	int y1, x1, y2, x2, rows = view_rows();
 	bool sel = selection_range(&y1, &x1, &y2, &x2);
 
 	/* ← / → without Shift collapse the selection to its edge */
-	if (!shift && !ctrl && sel && (vk == VK_LEFT || vk == VK_RIGHT)) {
+	if (!shift && !ctrl && !alt && sel && (vk == VK_LEFT || vk == VK_RIGHT)) {
 		ed.cy = vk == VK_LEFT ? y1 : y2;
 		ed.cx = vk == VK_LEFT ? x1 : x2;
 		ed.selecting = false;
@@ -485,21 +510,33 @@ static bool move_key (WORD vk, bool ctrl, bool shift) {
 
 	switch (vk) {
 	case VK_LEFT:
-		if (ctrl)
+		if (alt)
+			move_home();
+		else if (ctrl)
 			word_left(&ed.cy, &ed.cx);
 		else
 			move_left();
 		return false;
 	case VK_RIGHT:
-		if (ctrl)
+		if (alt)
+			ed.cx = LN->len;
+		else if (ctrl)
 			word_right(&ed.cy, &ed.cx);
 		else
 			move_right();
 		return false;
 	case VK_UP:
+		if (alt) {
+			move_paragraph(-1);
+			return false;
+		}
 		move_vertical(-1);
 		return true;
 	case VK_DOWN:
+		if (alt) {
+			move_paragraph(1);
+			return false;
+		}
 		move_vertical(1);
 		return true;
 	case VK_PRIOR:
@@ -1036,6 +1073,8 @@ static void show_help (void) {
 		L"Ctrl+A                   Select all",
 		L"Shift + arrows           Select",
 		L"Ctrl + ← →               Move by word",
+		L"Alt + ← →                Start, end of the line",
+		L"Alt + ↑ ↓                Previous, next blank line (paragraph)",
 		L"Ctrl+Backspace/Delete    Delete a word",
 		L"Tab  Shift+Tab           Indent, unindent the selected lines",
 		L"",
@@ -1142,6 +1181,11 @@ static void handle_key (const KEY_EVENT_RECORD *k) {
 	ed.message[0] = 0;
 	ed.follow = true;
 
+	if (alt && !ctrl && vk >= VK_LEFT && vk <= VK_DOWN) {
+		move_key(vk, false, true, shift);
+		ed.want_col = -1;
+		return;
+	}
 	if (alt && !ctrl) {
 		int m = menu_hotkey(vk);
 		if (vk == 'Z')
@@ -1207,7 +1251,7 @@ static void handle_key (const KEY_EVENT_RECORD *k) {
 	case VK_NEXT:
 	case VK_HOME:
 	case VK_END:
-		vertical = move_key(vk, ctrl, shift);
+		vertical = move_key(vk, ctrl, false, shift);
 		break;
 	default:
 		if (!ctrl && !alt && c >= 0x20 && c != 0x7f)

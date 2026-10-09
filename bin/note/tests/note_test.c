@@ -986,6 +986,26 @@ static void test_position (void) {
 	check_status("file:2:5 opens at line 2, column 5", L"Ln 2, Col 5");
 	check_row_has("the menu bar shows the name", 0, L"pos.txt");
 	check_screen("... without :2:5", L"pos.txt:2", false);
+	key(VK_RIGHT, 0, ALT);
+	check_status("Alt+Right: end of the line", L"Ln 2, Col 10");
+	key(VK_LEFT, 0, ALT);
+	check_status("Alt+Left: start of the line", L"Ln 2, Col 1");
+	quit();
+
+	write_file(L"para.txt", "a\r\nb\r\n\r\n\r\nc\r\nd\r\n\r\ne", 19);
+	start(L"para.txt");
+	key(VK_DOWN, 0, ALT);
+	check_status("Alt+Down: the blank line after the paragraph", L"Ln 3, Col 1");
+	key(VK_DOWN, 0, ALT);
+	check_status("... skips blank lines and the next paragraph", L"Ln 7, Col 1");
+	key(VK_DOWN, 0, ALT);
+	check_status("... end of the last line", L"Ln 8, Col 2");
+	key(VK_UP, 0, ALT);
+	check_status("Alt+Up: the blank line before the paragraph", L"Ln 7, Col 1");
+	key(VK_UP, 0, ALT | SHIFT_PRESSED);
+	check_status("Shift+Alt+Up selects up to line 4", L"Ln 4, Col 1");
+	key(VK_UP, 0, ALT);
+	check_status("... and the first line", L"Ln 1, Col 1");
 	quit();
 
 	write_file(L"br.c", "f(a[1]);", 8);
