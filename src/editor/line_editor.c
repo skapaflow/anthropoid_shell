@@ -205,29 +205,38 @@ static void ant_replace_all (const wchar_t *s) {
 }
 
 /*
- * History autosuggestion, like fish's (reader.rs, autosuggest): the newest
- * command that starts with the line (ignoring case) shows up in gray after
- * the cursor; → and End accept all of it, Ctrl+→ one word. Only with the
+ * History autosuggestion, like fish's (reader.rs, autosuggest): a command
+ * that starts with the line (ignoring case) shows up in gray after the
+ * cursor; the best frecency of data\history_rank.ant (points weighed by the
+ * time since the last use) first, then the newest in the history. → and End accept all of it, Ctrl+→ one word. Only with the
  * cursor at the end, no popup and some text in the line.
  */
 static bool suggest_on = false; /* turned off for the final drawing of the line */
+
+static bool suggests (const wchar_t *h) {
+
+	int hn = wcslen(h), p = 0;
+
+	if (hn <= len || _wcsnicmp(h, line, len))
+		return false;
+	/* the suggestion starts at a whole grapheme (never suggests just a combining accent) */
+	while (p < len)
+		p = ucd_grapheme_next(h, hn, p, NULL);
+	return p == len;
+}
 
 static const wchar_t *suggestion (void) {
 
 	if (!suggest_on || popup != POPUP_NONE || cursor < len || (int) wcsspn(line, L" ") == len)
 		return NULL;
 
-	for (int i = ant_history_count() - 1; i >= 0; i--) {
-		const wchar_t *h = ant_history_get(i);
-		int hn = wcslen(h), p = 0;
-		if (hn <= len || _wcsnicmp(h, line, len))
-			continue;
-		/* the suggestion starts at a whole grapheme (never suggests just a combining accent) */
-		while (p < len)
-			p = ucd_grapheme_next(h, hn, p, NULL);
-		if (p == len)
-			return h;
-	}
+	const wchar_t *h = ant_history_rank_find(suggests);
+
+	if (h)
+		return h;
+	for (int i = ant_history_count() - 1; i >= 0; i--)
+		if (suggests(ant_history_get(i)))
+			return ant_history_get(i);
 	return NULL;
 }
 

@@ -170,7 +170,7 @@ The line follows the `sh`/`bash` model:
 | `which [-a] name` | what the name runs, in the shell's order: alias, built-in, `[link]` shortcut, `[path]`, and the rest of PATH; `-a` shows all of them |
 | `mk [-f] file...` | creates files from the templates in `data\mk.ant`: `mk main.c` already brings the hello world, `mk main` (no template) creates an empty file; the exact name wins (`Makefile`, `LICENSE`, `.gitignore`) and then the extension; creates the folders of the path (`mk src\a\x.h`); does not overwrite (`-f` overwrites); `mk -l` lists the templates. In `mk.ant`, `[.c .h]` or `[=Makefile]` starts a template and `{name}`, `{NAME}` and `{year}` are replaced |
 | `true` / `false` | only set the exit code (0 / 1) |
-| `history` | log of every command (`42 2026-09-30 14:05:33 folder> command`, in `data\history.ant`; `history N` the last N lines, `history all` everything, `history clear` erases) |
+| `history` | log of every command (`2026-09-30 14:05:33 folder> command`, in `data\history.ant`; the lines are numbered when shown; `history N` the last N lines, `history all` everything, `history clear` erases it and `data\history_rank.ant`) |
 | `path` | folders where programs are searched (`path -f` opens `config.ant`) |
 | `alias` | lists the aliases (`alias name` shows one; `alias -f` opens `config.ant`) |
 | `2+3`, `(1+2)*3`, `10%3`, `sqrt(16)`, `2*pi`, `2 3 +` | calculator (infix or RPN; `+ - * / % ^ =` and parentheses; functions `sqrt abs round log ln` (with the `(` attached to the name; `log` is base 10) and constants `pi` and `e` (only inside an expression: a bare `pi` or `e` is still a command); `^` right to left, `-2^2` gives -4). In the console the result comes out in big letters; redirected (`2+3 | cat`, `> file`) it comes out as plain text. Error: `ant: calc: division by zero` (status 1) or a syntax error (status 2) |
@@ -241,9 +241,16 @@ The keys follow the Windows console line editor (the same as `cmd.exe`):
 | F8 | searches the history for commands that start with what is before the cursor |
 | F9 | looks up a history command by number |
 
-**Autosuggestion**, as in fish: while you type, the newest history command that starts
-with the text of the line (case-insensitive) shows in gray after the cursor. Enter runs
-only what was typed.
+**Autosuggestion**, as in fish: while you type, a history command that starts with the
+text of the line (case-insensitive) shows in gray after the cursor. Enter runs only what
+was typed. Commands are ranked by *frecency*, as in [zoxide](https://github.com/ajeetdsouza/zoxide):
+`data\history_rank.ant` keeps 50 commands, one per line with its points and the time of
+its last use (`12.50 1760000000 git status`). Each run adds a point; the suggestion weighs
+the points by how long ago the command was used (×4 within the hour, ×2 within the day,
+×0.5 within the week, ×0.25 after that). When the points add up to more than 1000, all of
+them shrink to 90% of that and those below 1 go away, so old habits fade. A new command
+with the list full replaces the one with the lowest score. Without a match there, the
+newest command in the history is suggested.
 
 The shell's messages are bash-style (`ant: x: command not found`, `syntax error near '|'`);
 the F2, F4 and F9 popups use conhost's texts (`Enter char to copy up to:`).
@@ -451,7 +458,7 @@ sits next to its `.c`. Code, comments and messages are in English.
 - The `release` workflow (`.github\workflows\release.yml`) builds with `WERROR=1` (warnings are
   errors; try `make WERROR=1` locally) and runs `make test` on every push and pull request. Pushing
   a tag such as `v1.0` also packs the package with `make dist` and attaches it to a draft release.
-- `data\config.ant`, `data\history.ant` and `bin\brick.dat` are personal and ignored by
+- `data\config.ant`, `data\history.ant`, `data\history_rank.ant` and `bin\brick.dat` are personal and ignored by
   git: do not add them.
 
 ---

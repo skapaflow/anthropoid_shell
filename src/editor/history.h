@@ -25,5 +25,6 @@ extern void ant_history_clear (void);
 extern void ant_history_load (void);
 extern void ant_history_print (int);
 extern void ant_history_clear_log (void);
+extern const wchar_t *ant_history_rank_find (bool (*) (const wchar_t *));
 
 #endif

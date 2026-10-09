@@ -1,6 +1,6 @@
 TAB             Complete files (commands in the 1st word and after | ; && || &)
 (SHIFT + TAB)   Previous option in the TAB menu
-(RIGHT / END)   Accept the gray suggestion from history (CTRL + RIGHT: one word)
+(RIGHT / END)   Accept the gray suggestion, frequent and recent first (CTRL + RIGHT: one word)
 (UP / DOWN)     Command history; F7 lists it, F8 searches by the start, ALT + F7 clears
 (CTRL + V)      Paste the clipboard (1st line only; SHIFT + INSERT too); CTRL + INSERT copies the line
 (LEFT)          On an empty line: folders of this session, ENTER goes there (left-cd)
@@ -41,7 +41,7 @@ KILL            End processes: KILL pid, KILL -9 pid, KILL %1 (job); KILL -L lis
 SLEEP           Wait: SLEEP 0.5, 2m, 1h
 CORE            RAM, CPU, HD's
 
-HISTORY         Command log, data\history.ant (HISTORY N: last N lines, HISTORY ALL: everything, HISTORY CLEAR erases it)
+HISTORY         Command log, data\history.ant (HISTORY N: last N lines, HISTORY ALL: everything, HISTORY CLEAR erases it and history_rank.ant)
 ALIAS           Aliases from data\config.ant (ALIAS name shows one, ALIAS -F edits the file)
 PATH            Folders where programs are looked for, from data\config.ant (PATH -F opens the file)
 EXPORT          EXPORT NAME=value sets an environment variable (alone: lists; NAME=value works too)

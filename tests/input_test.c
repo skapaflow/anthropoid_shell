@@ -15,6 +15,7 @@
 #include <wchar.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 #include <windows.h>
 
 #define CTRL       LEFT_CTRL_PRESSED
@@ -491,10 +492,10 @@ static bool prompt_row_is (const wchar_t *text) {
 	return !wcsncmp(row, prompt, prompt_len) && !wcscmp(row + prompt_len, text);
 }
 
+/* 'history clear' also empties history_rank.ant, so the autosuggestion only knows these three */
 static void fresh_history (void) {
 
-	begin();
-	key(VK_F7, 0, ALT);
+	run(L"history clear");
 	run(L"cmd_a 1");
 	run(L"cmd_b 2");
 	run(L"cmd_c 3");
@@ -516,6 +517,83 @@ static void check_suggestion (const char *name, const wchar_t *want) {
 	WideCharToMultiByte(CP_UTF8, 0, want, -1, a, sizeof a, NULL, NULL);
 	WideCharToMultiByte(CP_UTF8, 0, got, -1, b, sizeof b, NULL, NULL);
 	fprintf(report, "FAIL  %s\n      expected: [%s]\n      got:      [%s]\n", name, a, b);
+}
+
+/* history_rank.ant, next to ANT_HISTORY_FILE */
+static bool rank_path (wchar_t *path) {
+
+	int n = GetEnvironmentVariableW(L"ANT_HISTORY_FILE", path, MAX_PATH);
+
+	if (n < 4 || n + 6 >= MAX_PATH)
+		return false;
+	wcscpy(path + n - 4, L"_rank.ant");
+	return true;
+}
+
+/* replaces the file with text in UTF-8 */
+static void file_write (const wchar_t *path, const wchar_t *text) {
+
+	char bytes[8192];
+	DWORD written;
+	HANDLE f;
+	int b;
+
+	b = WideCharToMultiByte(CP_UTF8, 0, text, -1, bytes, sizeof bytes, NULL, NULL) - 1;
+	f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+	if (f == INVALID_HANDLE_VALUE)
+		return;
+	if (b > 0)
+		WriteFile(f, bytes, b, &written, NULL);
+	CloseHandle(f);
+}
+
+/* replaces history_rank.ant with text; the shell reads it again at the next command */
+static void rank_write (const wchar_t *text) {
+
+	wchar_t path[MAX_PATH];
+
+	if (rank_path(path))
+		file_write(path, text);
+}
+
+/* does line 'at' (any of them if at < 0) of the rank text read "points <time> cmd"? */
+static bool rank_has (const wchar_t *s, int at, const wchar_t *points, const wchar_t *cmd) {
+
+	int pn = wcslen(points), cn = wcslen(cmd);
+
+	for (int i = 0; s && *s; i++, s = wcschr(s, L'\n') ? wcschr(s, L'\n') + 1 : NULL) {
+		wchar_t *end;
+		long long last;
+
+		if ((at >= 0 && i != at) || wcsncmp(s, points, pn) || s[pn] != L' ')
+			continue;
+		last = wcstoll(s + pn + 1, &end, 10);
+		if (last >= 1000000000 && *end == L' ' && !wcsncmp(end + 1, cmd, cn) && end[1 + cn] == L'\n')
+			return true;
+	}
+	return false;
+}
+
+/* history_rank.ant in out; false if it does not exist */
+static bool rank_file (wchar_t *out, int max) {
+
+	wchar_t path[MAX_PATH];
+	char bytes[65536];
+	DWORD got = 0;
+	HANDLE f;
+	int n;
+
+	out[0] = 0;
+	if (!rank_path(path))
+		return false;
+	f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	if (f == INVALID_HANDLE_VALUE)
+		return false;
+	ReadFile(f, bytes, sizeof bytes, &got, NULL);
+	CloseHandle(f);
+	n = MultiByteToWideChar(CP_UTF8, 0, bytes, got, out, max - 1);
+	out[n] = 0;
+	return true;
 }
 
 /* history autosuggestion in gray, as in fish */
@@ -575,9 +653,68 @@ static void run_suggestion_cases (void) {
 	read_row(prompt_row + 1, s, width);
 	check_true("a long autosuggestion does not wrap the line", wcsspn(s, L" ") == wcslen(s), "the line below has text");
 	check("long autosuggestion: cursor at the end of the text", L"longo_", 6);
+
+	/* the most used command (history_rank.ant) comes before the newest */
+	fresh_history();
+	run(L"cmd_a 1");
+	run(L"cmd_a 1");
+	run(L"cmd_c 3");
+	begin(); type(L"cmd");
+	check_suggestion("the autosuggestion prefers the most used command", L"_a 1");
+	rank_file(s, 8192);
+	check_true("history_rank.ant: points, last use and command, most points first",
+		rank_has(s, 0, L"3.00", L"cmd_a 1") && rank_has(s, 1, L"2.00", L"cmd_c 3") && rank_has(s, 2, L"1.00", L"cmd_b 2"),
+		"unexpected rank file");
+
+	/* full: the commands with fewest points, used longest ago, go away */
+	for (int i = 0; i < 50; i++) {
+		wchar_t cmd[32];
+		swprintf(cmd, 32, L"rank_%d", i);
+		run(cmd);
+	}
+	rank_file(s, 8192);
+	{
+		int lines = 0;
+		for (wchar_t *p = s; *p; p++)
+			lines += *p == L'\n';
+		check_true("history_rank.ant keeps 50 commands", lines == 50, "not 50 lines");
+	}
+	check_true("full rank drops the lowest score, oldest first",
+		rank_has(s, -1, L"3.00", L"cmd_a 1") && rank_has(s, -1, L"2.00", L"cmd_c 3") && rank_has(s, -1, L"1.00", L"rank_49")
+		&& rank_has(s, -1, L"1.00", L"rank_2") && !wcsstr(s, L"cmd_b 2") && !wcsstr(s, L" rank_1\n") && !wcsstr(s, L" rank_0\n"),
+		"wrong commands dropped");
+
+	/* frecency: 3 points from now beat 20 points from 3 days ago (3 × 4 > 20 / 2) */
+	{
+		long long now = time(NULL);
+
+		run(L"history clear");
+		swprintf(s, 8192, L"20.00 %lld git_status_x\n3.00 %lld git_push_x\n", now - 3 * 86400, now);
+		rank_write(s);
+		run(L"zz_other");
+		begin(); type(L"git_");
+		check_suggestion("the autosuggestion weighs the points by the last use", L"push_x");
+
+		/* the first format, "points command", still reads (used now) */
+		rank_write(L"5 old_cmd x\n");
+		run(L"zz_other");
+		rank_file(s, 8192);
+		check_true("history_rank.ant without the time still reads", rank_has(s, -1, L"5.00", L"old_cmd x"), "old line lost");
+
+		/* aging: more than 1000 points shrink to 900; below 1 goes away; the new command stays */
+		swprintf(s, 8192, L"990.00 %lld big_cmd\n10.50 %lld small_cmd\n1.00 %lld tiny_cmd\n", now - 2 * 86400, now - 2 * 86400, now - 2 * 86400);
+		rank_write(s);
+		run(L"zz_new");
+		rank_file(s, 8192);
+		check_true("aging shrinks the points to 90% of 1000",
+			rank_has(s, 0, L"889.67", L"big_cmd") && rank_has(s, 1, L"9.44", L"small_cmd") && rank_has(s, 2, L"1.00", L"zz_new")
+			&& !wcsstr(s, L"tiny_cmd"), "unexpected points after aging");
+	}
+	run(L"history clear");
+	check_true("history clear erases history_rank.ant", !rank_file(s, 8192), "rank file still there");
 }
 
-/* does the log file (ANT_HISTORY_FILE) have this text? (format: 42 2026-09-30 14:05:33 folder> command) */
+/* does the log file (ANT_HISTORY_FILE) have this text? (format: 2026-09-30 14:05:33 folder> command) */
 static bool history_file_has (const wchar_t *text) {
 
 	wchar_t path[MAX_PATH], *all;
@@ -595,11 +732,11 @@ static bool history_file_has (const wchar_t *text) {
 	CloseHandle(f);
 	all = calloc(got + 1, sizeof(wchar_t));
 	MultiByteToWideChar(CP_UTF8, 0, bytes, got, all, got);
-	/* each line starts with "N AAAA-MM-DD HH:MM:SS " */
+	/* each line starts with "AAAA-MM-DD HH:MM:SS ", without a number in front */
 	for (wchar_t *p = all; p && *p; p = wcschr(p, L'\n') ? wcschr(p, L'\n') + 1 : NULL) {
-		int i, y, mo, d, h, mi, sec;
+		int y, mo, d, h, mi, sec;
 		wchar_t *hit = wcsstr(p, text), *end = wcschr(p, L'\n');
-		if (swscanf(p, L"%d %d-%d-%d %d:%d:%d ", &i, &y, &mo, &d, &h, &mi, &sec) == 7 && hit && (!end || hit < end))
+		if (swscanf(p, L"%d-%d-%d %d:%d:%d ", &y, &mo, &d, &h, &mi, &sec) == 6 && hit && (!end || hit < end))
 			found = true;
 	}
 	free(all);
@@ -713,12 +850,25 @@ static void run_history_cases (void) {
 
 	fresh_history();
 	run(L"log");
-	check_true("the log file has index, date, time and folder",
+	check_true("the log file has date, time and folder, without a number",
 		history_file_has(L"> cmd_b 2\n") && history_file_has(L" cmd_a 1\n"), "history.ant without the cmd_a and cmd_b lines");
 	check_true("log (alias) lists the history", below_has(L"cmd_b 2"), "log did not show the commands");
 	run(L"log -d");
 	begin(); key(VK_UP, 0, 0);
 	check("log -d (alias) erases the history", L"", 0);
+
+	/* 'history' numbers the lines itself; lines of the first format ("42 date ...") still show */
+	{
+		wchar_t path[MAX_PATH];
+
+		GetEnvironmentVariableW(L"ANT_HISTORY_FILE", path, MAX_PATH);
+		file_write(path, L"42 2026-01-02 03:04:05 C:\\x> old_fmt_cmd\n2026-01-02 03:04:06 C:\\x> new_fmt_cmd\n");
+		run(L"history");
+		check_true("history numbers the lines, old format included",
+			below_has(L"1 2026-01-02 03:04:05 C:\\x> old_fmt_cmd") && below_has(L"2 2026-01-02 03:04:06 C:\\x> new_fmt_cmd")
+			&& !below_has(L"42 2026"), "unexpected history lines");
+		run(L"history clear");
+	}
 
 	run_suggestion_cases();
 }
@@ -2062,6 +2212,8 @@ int main (void) {
 	wcscat(history_path, L"ant_input_test_history.ant");
 	DeleteFileW(history_path);
 	SetEnvironmentVariableW(L"ANT_HISTORY_FILE", history_path);
+	wcscpy(history_path + wcslen(history_path) - 4, L"_rank.ant");
+	DeleteFileW(history_path);
 
 	memset(&si, 0, sizeof si);
 	si.cb = sizeof si;
