@@ -50,9 +50,16 @@ $(foreach p,$(TOOL_PROGS),$(eval $(call TOOL_RULE,$(p))))
 ascii.exe: asc/ascii.c
 	$(CC) $(CFLAGS) -s $< -o $@
 
-# vplay: no console (-mwindows); winmm = MCI, dwmapi = composition, gdi32 = the time bar
-vplay.exe: vplay/vplay.c
-	$(CC) $(CFLAGS) -s -mwindows $< -lwinmm -ldwmapi -lgdi32 -o $@
+# vplay: wWinMain (-municode), no console (-mwindows). Media Foundation first
+# (mfplat mfuuid; d3d11 dxgi dxguid = frame server swap chain and video processor),
+# DirectShow as fallback for what MF has no decoder for (strmiids: the installed
+# filters, LAV from K-Lite); dwmapi = DwmFlush pacing, msimg32 = AlphaBlend of the bar
+VPLAY_SRCS = vplay/vplay.c vplay/dshow.c
+VPLAY_LIBS = -lmfplat -lmfuuid -ld3d11 -ldxgi -ldxguid -ldwmapi -lmsimg32 -lstrmiids \
+             -lgdi32 -luser32 -lshell32 -lole32 -loleaut32 -luuid
+
+vplay.exe: $(VPLAY_SRCS) vplay/dshow.h
+	$(CC) $(CFLAGS) -std=c99 -s -municode -mwindows $(VPLAY_SRCS) $(VPLAY_LIBS) -o $@
 
 # note: several sources; note.cfg is read from the folder of note.exe
 note.exe: $(NOTE_SRCS) $(NOTE_HDRS)

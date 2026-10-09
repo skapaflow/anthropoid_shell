@@ -1,364 +1,226 @@
-/*
+/*****************************************************************************
+	vplay - small borderless always-on-top video player.
 	build: bin\Makefile (from bin\: make vplay.exe; from the root: make bin).
-	It is a GUI program (-mwindows), so it has no console of its own.
-*/
 
-/*
-	vplay - borderless always-on-top video overlay, via MCI (mciSendString).
+	Media Foundation (IMFMediaEngine) in frame-server mode: the engine decodes
+	(hardware when available) and every new frame is copied into the back
+	buffer of our own D3D11 swap chain. The swap chain is GDI compatible, so
+	the time bar is drawn with plain GDI on top of the frame before Present.
+	One window, no child window from the decoder: hit testing for resizing
+	and the overlay bar just work.
 
-	About MCI on Windows 10/11:
-	  mciSendString was NOT removed. winmm.dll still exports mciSendStringW and
-	  the MPEGVideo driver (mciqtz32.dll, DirectShow based) is still installed.
-	  What breaks in practice is resolving the device from the file extension: MCI
-	  looks in HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\MCI Extensions and, if
-	  the extension is not there (.mkv, .webm, ...), treats the whole path as a device name
-	  and fails with error 310 ("specify a device name with fewer
-	  than 79 characters") - which has nothing to do with the real problem.
-	  The way out is to open it naming the driver: open "file" type mpegvideo alias X.
-	  Then DirectShow takes over and plays any format that has a filter.
-	  (The mpegvideo!"file" syntax used in C# examples does NOT go through the
-	  mciSendString parser - it returns error 294, missing quotes.)
-*/
+	When Media Foundation has no decoder for a file (AV1 without the Store
+	extension, ...), the DirectShow filters installed on the system take over
+	(dshow.c: LAV Filters from K-Lite, for example), drawn into the same
+	buffer with GDI.
 
-#define _WIN32_WINNT 0x0600
+	Threads:
+	  main    window, input, engine commands
+	  render  waits for the compositor (DwmFlush), polls the engine for a new
+	          frame and draws; it keeps running while the window is being
+	          moved or resized (modal loops of the main thread)
+
+	usage: vplay [file]     (a running vplay receives the file instead)
+*****************************************************************************/
+
+#define COBJMACROS
+#define _WIN32_WINNT 0x0A00
 
 #undef  UNICODE
 #define UNICODE
 #undef  _UNICODE
 #define _UNICODE
 
-#include <wchar.h>
-#include <tchar.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <stdlib.h>
-#include <dwmapi.h>
-#include <stdbool.h>
 #include <windows.h>
 #include <windowsx.h>
-#include <mmsystem.h>
+#include <shellapi.h>
+#include <dwmapi.h>
+#include <d3d11.h>
+#include <d3d10.h>
+#include <dxgi.h>
+#undef GetCurrentTime /* winbase.h macro clashes with IMFMediaEngine::GetCurrentTime */
+#include <mfapi.h>
+#include <mfmediaengine.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <wchar.h>
 
-#define BUFLEN   256   /* resposta do MCI                       */
-#define PATHLEN 1024   /* file path                            */
-#define CMDLEN  2048   /* assembled MCI command (fits PATHLEN)  */
-#define NKEYS    256   /* virtual-key codes validos: 0x00..0xFF */
+#include "dshow.h"
 
-#define BAR_H     13   /* height of the time bar, in pixels     */
-#define BAR_FONT_H 12  /* height of the bar font                  */
-#define MIN_W    128   /* minimum window width                 */
-#define DRAG_TOL   3   /* px before a click becomes a drag     */
-#define SEEK_MS 10000  /* step of the left/right arrows         */
+#define APP_CLASS    L"vplay"
+#define WM_ENGINE    (WM_APP + 1)  /* wparam: engine event, lparam: param2      */
+#define WM_DSHOW     (WM_APP + 2)  /* DirectShow graph events are queued        */
+#define CD_OPEN      0x76706F70    /* WM_COPYDATA: open the path in lpData      */
+#define CD_SHOW      0x76707368    /* WM_COPYDATA: show the window              */
 
-#define BLACK RGB(0x0,0x0,0x0)
-#define GRAY  RGB(128,128,128)
-#define WHITE RGB(255,255,255)
-#define RED   RGB(255,0x0,0x0)
-#define BLUE  RGB(0x0,128,255)
+#define PATHLEN      1024
+#define MIN_W        160           /* minimum window width (96 dpi)             */
+#define EDGE         6             /* resize band inside the window (96 dpi)    */
+#define BAR_H        28            /* height of the time bar (96 dpi)           */
+#define FONT_H       13
+#define SEEK_STEP    10.0          /* left/right arrows, in seconds             */
+#define HIDE_MS      1500          /* bar hides after this long without moving  */
+#define TIMER_MS     50
 
-const int ID_TIMER = 1;
+/* ---- shared with the render thread (under `lock`) ----------------------- */
 
-/* ---- window state ---------------------------------------------------- */
+/* who decodes the current file: Media Foundation first; DirectShow (LAV
+   Filters, ...) when Media Foundation has no decoder for it */
+enum { BK_MF, BK_DS };
 
-int  win_x = 925;          /* position (screen)                              */
-int  win_y =  38;
-int  win_w = 320;          /* video area                                     */
-int  win_h = 180;
-int  win_z =   0;          /* extra height taken by the time bar            */
-int  win_alpha = 255;
-bool visible    = true;    /* window on screen (HOME hides, END shows)      */
-bool show_timer = false;
-bool fullscreen = false;
-RECT saved_rect;           /* geometry before fullscreen                    */
+typedef struct {
+	int     backend;
+	bool    visible;       /* window on screen (Home hides, End shows)        */
+	bool    loaded;        /* source has metadata                             */
+	bool    has_video;
+	bool    paused;
+	bool    bar;           /* time bar shown                                  */
+	bool    seeking;       /* dragging on the bar                             */
+	double  seek_to;       /* target while dragging, seconds                  */
+	double  duration;      /* seconds; 0 when unknown                         */
+	int     hover_x;       /* cursor x over the track, -1 when not            */
+	bool    hover_btn;     /* cursor over the play/pause button               */
+	float   scale;         /* dpi / 96                                        */
+	int     tw_short;      /* width of "00:00" and "00:00:00" in the bar font */
+	int     tw_long;
+	wchar_t osd[160];      /* message at the top left                         */
+	wchar_t idle[PATHLEN]; /* centered text when there is no image            */
+	bool    dirty;         /* something changed: draw again                   */
+} UI;
 
-/* ---- estado do player ---------------------------------------------------- */
+static UI ui;
+static CRITICAL_SECTION lock;    /* guards ui                              */
+static CRITICAL_SECTION elock;   /* serializes calls into the media engine */
+static HANDLE wake;              /* wakes the render thread                */
+static HANDLE render_thread;
+static volatile LONG quitting;
 
-bool player_ok = false;    /* an MCI device is open                          */
-bool paused    = false;
-bool muted     = false;
-int  volume    = 1000;     /* 0..1000                                         */
-int  vid_w = 0, vid_h = 0; /* native video dimensions                       */
-int  ms = 0, _ms = 0;      /* posicao e duracao, em milissegundos             */
-int  hor, min, seg;
-wchar_t s = ':';           /* state glyph shown on the bar                   */
+/* ---- main thread only --------------------------------------------------- */
 
-/* ---- estado do mouse ----------------------------------------------------- */
+static HWND hwnd;
+static IMFMediaEngine        *engine;
+static IMFMediaEngineEx      *engine_ex;
+static IMFDXGIDeviceManager  *dxgi_mgr;
+static ID3D11Device          *device;
+static IDXGISwapChain        *swap;
+static HWINEVENTHOOK          hook;
 
-bool  dragging   = false;
-bool  drag_armed = false;
-POINT drag_from;           /* point where the button was pressed (screen)   */
-POINT drag_off;            /* offset cursor -> window corner                */
-
-/* ---- buffers ------------------------------------------------------------- */
-
-wchar_t str[BUFLEN];
-wchar_t buf[BUFLEN];
-wchar_t time_1[64];
-wchar_t time_2[64];
-wchar_t file_name[PATHLEN];
-wchar_t mci_err[BUFLEN];   /* last MCI error message                        */
-
-int KEY[NKEYS];
-int KEYP[NKEYS];
-
-HFONT font = NULL;
-HBRUSH back_brush = NULL;
+static wchar_t   file_name[PATHLEN];
+static double    aspect;          /* display aspect of the video, 0 = none */
+static int       vid_w;           /* native width, for the initial size     */
+static bool      first_size = true;
+static bool      fullscreen;
+static RECT      saved_rect;      /* geometry before fullscreen            */
+static int       win_alpha = 255;
+static double    volume = 1.0;
+static bool      muted;
+static bool      hidden_paused;   /* Home paused it: End resumes           */
+static bool      tracking;        /* TrackMouseEvent armed: client area    */
+static bool      nc_tracking;     /* ... and the "title bar" (the video)   */
+static POINT     last_mouse = { -1, -1 };
+static ULONGLONG last_activity;
+static ULONGLONG osd_until;
+static bool      seek_pending;
 
 /* ========================================================================== */
-/* MCI                                                                        */
+/* helpers                                                                    */
 /* ========================================================================== */
 
-/*
-	Sends a command to MCI and keeps the translated error message.
-	Returns 0 on success, like mciSendString itself.
-*/
-MCIERROR mci (wchar_t *reply, size_t reply_len, const wchar_t *fmt, ...) {
+static void ui_changed (void) {
 
-	wchar_t cmd[CMDLEN];
+	ui.dirty = true;
+	SetEvent(wake);
+}
+
+static void osd (ULONGLONG ms, const wchar_t *fmt, ...) {
+
 	va_list ap;
-
+	EnterCriticalSection(&lock);
 	va_start(ap, fmt);
-	vswprintf(cmd, CMDLEN, fmt, ap);
+	vswprintf(ui.osd, 160, fmt, ap);
 	va_end(ap);
-
-	if (reply && reply_len)
-		reply[0] = L'\0';
-
-	MCIERROR e = mciSendStringW(cmd, reply, (UINT) reply_len, NULL);
-
-	if (e) {
-		if (!mciGetErrorStringW(e, mci_err, BUFLEN))
-			swprintf(mci_err, BUFLEN, L"MCI error %lu", (unsigned long) e);
-	} else
-		mci_err[0] = L'\0';
-
-	return e;
+	ui_changed();
+	LeaveCriticalSection(&lock);
+	osd_until = GetTickCount64() + ms;
 }
 
-/* numeric player status; -1 when the command fails */
-long mci_status (const wchar_t *what) {
+static const wchar_t *base_name (const wchar_t *path) {
 
-	if (mci(buf, BUFLEN, L"status _player_ %ls", what))
-		return -1;
-	return _wtol(buf);
+	const wchar_t *b = path;
+	for (const wchar_t *p = path; *p; p++)
+		if (*p == L'\\' || *p == L'/')
+			b = p + 1;
+	return b;
 }
 
-void player_close (void) {
+static void fmt_time (wchar_t *out, size_t n, double t, bool hours) {
 
-	if (player_ok) {
-		mci(NULL, 0, L"close _player_");
-		player_ok = false;
-	}
+	if (!(t >= 0))
+		t = 0;
+	long s = (long) t;
+	if (hours)
+		swprintf(out, n, L"%ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60);
+	else
+		swprintf(out, n, L"%02ld:%02ld", s / 60, s % 60);
 }
 
-/*
-	Opens the file trying, in order:
-	  1. letting MCI pick the driver by extension      (.avi -> avivideo,
-	     .wav -> waveaudio, .mid -> sequencer: each on its native driver);
-	  2. forcing DirectShow with "type mpegvideo"        (fixes .mkv, .webm and
-	     any extension missing from the registry);
-	  3. retrying with the 8.3 path, for the rare case where the MCI parser
-	     trips on some character of the long name.
-*/
-bool player_load (const wchar_t *file) {
+static int px (float scale, int v) {
 
-	wchar_t shortp[MAX_PATH];
-
-	player_close();
-
-	if (!mci(NULL, 0, L"open \"%ls\" alias _player_", file))
-		player_ok = true;
-	else if (!mci(NULL, 0, L"open \"%ls\" type mpegvideo alias _player_", file))
-		player_ok = true;
-	else if (GetShortPathNameW(file, shortp, MAX_PATH)
-	      && !mci(NULL, 0, L"open \"%ls\" type mpegvideo alias _player_", shortp))
-		player_ok = true;
-
-	return player_ok;
-}
-
-/* reads the native video dimensions.
-   "where source" is stable; "where destination" changes on every "put" */
-void player_measure (void) {
-
-	int x, y, w, h;
-
-	vid_w = vid_h = 0;
-
-	if (!mci(buf, BUFLEN, L"where _player_ source")
-	 && swscanf(buf, L"%d %d %d %d", &x, &y, &w, &h) == 4 && w > 0 && h > 0) {
-		vid_w = w;
-		vid_h = h;
-	} else if (!mci(buf, BUFLEN, L"where _player_ destination")
-	        && swscanf(buf, L"%d %d %d %d", &x, &y, &w, &h) == 4 && w > 0 && h > 0) {
-		vid_w = w;
-		vid_h = h;
-	}
-}
-
-/* derives the height from the width, preserving the native aspect ratio.
-   avoids the accumulated drift of scaling width and height separately */
-void size_from_width (int w) {
-
-	win_w = (w < MIN_W ? MIN_W : w);
-
-	/* without an image the height is not derived from anything: the window is just the bar */
-	if (vid_w <= 0 || vid_h <= 0)
-		return;
-
-	win_h = (int) ((double) win_w * vid_h / vid_w + 0.5);
-
-	if (win_h < 1)
-		win_h = 1;
-}
-
-/* applies position/size to the window and to the MCI destination rectangle */
-void player_layout (HWND hwnd) {
-
-	SetWindowPos(hwnd, HWND_TOPMOST, win_x, win_y, win_w, win_h + win_z,
-	             SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : 0));
-
-	if (player_ok)
-		mci(NULL, 0, L"put _player_ destination at 0 0 %d %d", win_w, win_h);
-}
-
-void set_alpha (HWND hwnd, int a) {
-
-	win_alpha = (a > 255 ? 255 : (a < 5 ? 5 : a));
-	SetLayeredWindowAttributes(hwnd, 0, (BYTE) win_alpha, LWA_ALPHA);
-}
-
-void set_volume (int v) {
-
-	volume = (v > 1000 ? 1000 : (v < 0 ? 0 : v));
-	if (player_ok)
-		mci(NULL, 0, L"setaudio _player_ volume to %d", volume);
+	return (int) (v * scale + 0.5f);
 }
 
 /*
-	Plays from a position keeping the loop.
-	"play ... repeat" makes the driver itself restart at the end, with no gap -
-	so there is no manual loop here comparing position with length.
+	Bar layout, shared by drawing and hit testing:
+	[ play/pause ][ 00:12 ][==========track==========][ 03:45 ]
+	The times go away when the window is too narrow for them.
 */
-void player_play_from (int at) {
+typedef struct {
+	RECT bar, btn, track, cur, tot;
+	bool show_cur, show_tot, hours;
+} LAYOUT;
 
-	if (!player_ok)
-		return;
+static LAYOUT layout (int w, int h, const UI *u) {
 
-	if (at < 0)
-		at = 0;
-	if (_ms > 0 && at >= _ms)
-		at = 0;
+	LAYOUT l;
+	int bh  = px(u->scale, BAR_H);
+	int pad = px(u->scale, 8);
+	int min = px(u->scale, 60);
 
-	ms = at;
-	paused = false;
-	mci(NULL, 0, L"play _player_ from %d repeat", at);
-}
+	l.hours = (u->duration >= 3600);
+	int tw  = (l.hours ? u->tw_long : u->tw_short);
 
-void player_pause (void) {
+	l.bar = (RECT) { 0, h - bh, w, h };
+	l.btn = (RECT) { 0, h - bh, bh, h };
 
-	if (player_ok) {
-		paused = true;
-		s = 'X';
-		mci(NULL, 0, L"pause _player_");
-	}
-}
-
-void player_resume (void) {
-
-	if (!player_ok)
-		return;
-
-	paused = false;
-	s = ':';
-
-	/* "play repeat" without "from" resumes at the current position and re-arms the loop;
-	   "resume" would fail when there was never a pause before */
-	mci(NULL, 0, L"play _player_ repeat");
-}
-
-/* ========================================================================== */
-/* util                                                                       */
-/* ========================================================================== */
-
-void get_input (void) {
-
-	for (int i = 0; i < NKEYS; i++) {
-		bool k = !!(GetAsyncKeyState(i) & 0x8000);
-		/* key down */
-		KEY[i] = k;
-		/* key press */
-		if (KEYP[i] <= 1)
-			KEYP[i] = k;
-		/* key up */
-		if (k == 0 && KEYP[i] == 2)
-			KEYP[i] = -1;
-	}
-}
-
-int key (int k) {
-
-	return (k >= 0 && k < NKEYS) ? KEY[k] : 0;
-}
-
-int key_release (int k) {
-
-	if (k >= 0 && k < NKEYS && KEYP[k] == -1) {
-		KEYP[k] = 0;
-		return 1;
-	}
-	return 0;
-}
-
-int key_press (int k) {
-
-	if (k >= 0 && k < NKEYS && KEYP[k] == 1) {
-		KEYP[k] = 2;
-		return 1;
-	}
-	return 0;
-}
-
-void set_color (HDC xdc, COLORREF text, COLORREF bground) {
-
-	SetBkColor(xdc, bground);
-	SetTextColor(xdc, text);
-}
-
-wchar_t *barra (double x, double m) {
-
-	static wchar_t v[0XB];
-	int fill = 0;
-
-	if (m > 0) {
-		fill = (int) ((x / m) * 0XA + 0.5);
-		fill = (fill > 0XA ? 0XA : (fill < 0 ? 0 : fill));
+	int x0 = l.btn.right, x1 = w - pad;
+	l.show_cur = l.show_tot = false;
+	if (x1 - x0 - 2 * (tw + pad) >= min) {
+		l.show_cur = l.show_tot = true;
+		x0 += tw + pad;
+		x1 -= tw + pad;
+	} else if (x1 - x0 - (tw + pad) >= min) {
+		l.show_cur = true;
+		x0 += tw + pad;
 	}
 
-	for (int i = 0; i < 0XA; i++)
-		v[i] = (i < fill ? L'#' : L'.');
-	v[0XA] = L'\0';
-
-	return v;
+	l.cur   = (RECT) { l.btn.right, h - bh, l.btn.right + tw, h };
+	l.track = (RECT) { x0, h - bh, x1, h };
+	l.tot   = (RECT) { x1 + pad, h - bh, x1 + pad + tw, h };
+	return l;
 }
 
-/* time bar rectangle, in client coordinates */
-RECT bar_rect (HWND hwnd) {
+static bool in_rect (const RECT *r, int x, int y) {
 
-	RECT r;
-	GetClientRect(hwnd, &r);
-	r.top = win_h;
-	if (r.bottom < r.top)
-		r.bottom = r.top;
-	return r;
+	return x >= r->left && x < r->right && y >= r->top && y < r->bottom;
 }
 
 /*
-	Writes to the console that launched the process. The binary is built with
-	-mwindows, so it has no stdout of its own: it must attach to the parent console.
-	A console handle only accepts WriteConsoleW; if the output was redirected
-	to a file or pipe, the handle is a plain file and needs bytes.
+	Writes to the console that launched the process (built with -mwindows,
+	so there is no stdout of its own). A redirected handle needs UTF-8 bytes.
 */
-void console_print (const wchar_t *text) {
+static void console_print (const wchar_t *text) {
 
 	bool   attached = AttachConsole(ATTACH_PARENT_PROCESS);
 	HANDLE opened   = INVALID_HANDLE_VALUE;
@@ -392,529 +254,1395 @@ void console_print (const wchar_t *text) {
 }
 
 /* ========================================================================== */
-/* player                                                                     */
+/* render thread                                                              */
 /* ========================================================================== */
 
-bool create_player (HWND hwnd, const wchar_t *file) {
+static HDC     dim_dc;    /* 1x1 black bitmap, stretched with constant alpha */
+static HBITMAP dim_bmp;
+static HFONT   font;
+static float   font_scale;
+static int     font_h;
 
-	if (!player_load(file)) {
-		wchar_t msg[CMDLEN];
-		swprintf(msg, CMDLEN, L"Could not open:\n%ls\n\nMCI: %ls", file, mci_err);
-		MessageBoxW(hwnd, msg, L"vplay", MB_ICONEXCLAMATION | MB_OK);
-		return false;
-	}
+static void fill (HDC dc, const RECT *r, COLORREF c) {
 
-	/* without this length/position may come in frames, and all the arithmetic breaks */
-	mci(NULL, 0, L"set _player_ time format milliseconds");
-
-	player_measure();
-
-	/* initial size: 1/6 of native, never smaller than MIN_W.
-	   the window is WS_POPUP: there is no border or title to subtract, so
-	   AdjustWindowRect here would only distort the aspect ratio */
-	if (!fullscreen)
-		size_from_width(vid_w > 0 ? vid_w / 6 : win_w);
-
-	/* video drawn straight into our window.
-	   HWND is truncated to 32 bits on purpose: the MCI parser only accepts
-	   a decimal integer, and Windows handles have 32 significant bits */
-	mci(NULL, 0, L"window _player_ handle %lu state show",
-	    (unsigned long) (ULONG_PTR) hwnd);
-
-	player_layout(hwnd);
-
-	/* duracao */
-	_ms = (int) mci_status(L"length");
-	if (_ms < 0)
-		_ms = 0;
-	hor = (_ms/3600000) % 60; min = (_ms/60000) % 60; seg = (_ms/1000) % 60;
-	swprintf(time_2, 64, L"%.2d:%.2d:%.2d", hor, min, seg);
-
-	set_volume(volume);
-	if (muted)
-		mci(NULL, 0, L"setaudio _player_ off");
-
-	s = ':';
-	player_play_from(0);
-
-	/* audio-only file: no image to show, the window becomes just the bar */
-	if (vid_w == 0 || vid_h == 0) {
-		show_timer = true;
-		win_h = 1;
-		win_z = BAR_H;
-		player_layout(hwnd);
-	}
-
-	return true;
+	SetDCBrushColor(dc, c);
+	FillRect(dc, r, (HBRUSH) GetStockObject(DC_BRUSH));
 }
 
-void drop_file (HWND hwnd, WPARAM wparam) {
+static void dim (HDC dc, const RECT *r, BYTE alpha) {
 
-	wchar_t path[PATHLEN] = {0};
-	HDROP drop = (HDROP) wparam;
+	BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, 0 };
+	if (!AlphaBlend(dc, r->left, r->top, r->right - r->left, r->bottom - r->top,
+	                dim_dc, 0, 0, 1, 1, bf))
+		fill(dc, r, RGB(0, 0, 0));
+}
 
-	UINT files = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
+static void make_font (float scale) {
 
-	/* several files dropped at once: only the first matters,
-	   abrir os demais em sequencia so reabriria o device a toa */
-	if (files > 0 && DragQueryFileW(drop, 0, path, PATHLEN) > 0) {
-		if (create_player(hwnd, path)) {
-			wcsncpy(file_name, path, PATHLEN - 1);
-			file_name[PATHLEN - 1] = L'\0';
-			visible = true;
-			ShowWindow(hwnd, SW_SHOW);
-			player_layout(hwnd);
+	if (font)
+		DeleteObject(font);
+
+	font = CreateFontW(-px(scale, FONT_H), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+	                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+	                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+	font_scale = scale;
+
+	HDC dc = CreateCompatibleDC(NULL);
+	HGDIOBJ old = SelectObject(dc, font);
+	SIZE s1, s2;
+	TEXTMETRICW tm;
+	GetTextExtentPoint32W(dc, L"00:00", 5, &s1);
+	GetTextExtentPoint32W(dc, L"0:00:00", 7, &s2);
+	GetTextMetricsW(dc, &tm);
+	SelectObject(dc, old);
+	DeleteDC(dc);
+
+	font_h = tm.tmHeight;
+	EnterCriticalSection(&lock);
+	ui.tw_short = s1.cx;
+	ui.tw_long  = s2.cx;
+	LeaveCriticalSection(&lock);
+}
+
+static void draw_bar (HDC dc, const UI *u, int w, int h, double t) {
+
+	LAYOUT l = layout(w, h, u);
+	float  s = u->scale;
+	wchar_t txt[32];
+
+	dim(dc, &l.bar, 150);
+
+	/* button: shows what a click does (play when paused) */
+	int cx = (l.btn.left + l.btn.right) / 2, cy = (l.btn.top + l.btn.bottom) / 2;
+	int k  = px(s, 5);
+	COLORREF ic = (u->hover_btn ? RGB(255, 255, 255) : RGB(210, 210, 210));
+	SelectObject(dc, GetStockObject(NULL_PEN));
+	SelectObject(dc, GetStockObject(DC_BRUSH));
+	SetDCBrushColor(dc, ic);
+	if (u->paused) {
+		POINT tri[3] = { { cx - k + 1, cy - k }, { cx - k + 1, cy + k }, { cx + k, cy } };
+		Polygon(dc, tri, 3);
+	} else {
+		RECT a = { cx - k, cy - k, cx - k + px(s, 3), cy + k };
+		RECT b = { cx + k - px(s, 3), cy - k, cx + k, cy + k };
+		fill(dc, &a, ic);
+		fill(dc, &b, ic);
+	}
+
+	/* track */
+	bool   hot  = (u->hover_x >= 0 || u->seeking);
+	int    th   = px(s, hot ? 5 : 3);
+	int    ty   = (l.track.top + l.track.bottom) / 2;
+	int    tw   = l.track.right - l.track.left;
+	double frac = (u->duration > 0 ? t / u->duration : 0);
+	if (frac < 0) frac = 0;
+	if (frac > 1) frac = 1;
+
+	RECT back = { l.track.left, ty - th / 2, l.track.right, ty - th / 2 + th };
+	RECT done = back;
+	done.right = l.track.left + (int) (tw * frac + 0.5);
+	fill(dc, &back, RGB(90, 90, 90));
+	fill(dc, &done, RGB(255, 255, 255));
+
+	if (hot && u->duration > 0) {
+		int r = px(s, 6);
+		SetDCBrushColor(dc, RGB(255, 255, 255));
+		Ellipse(dc, done.right - r, ty - r, done.right + r, ty + r);
+	}
+
+	/* times */
+	HGDIOBJ old = SelectObject(dc, font);
+	SetBkMode(dc, TRANSPARENT);
+	SetTextColor(dc, RGB(230, 230, 230));
+
+	if (l.show_cur) {
+		fmt_time(txt, 32, t, l.hours);
+		DrawTextW(dc, txt, -1, &l.cur, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+	}
+	if (l.show_tot) {
+		fmt_time(txt, 32, u->duration, l.hours);
+		DrawTextW(dc, txt, -1, &l.tot, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+	}
+
+	/* time under the cursor, above the bar */
+	if (u->hover_x >= 0 && u->duration > 0 && tw > 0) {
+		double ht = (double) (u->hover_x - l.track.left) / tw * u->duration;
+		if (ht < 0) ht = 0;
+		if (ht > u->duration) ht = u->duration;
+		fmt_time(txt, 32, ht, l.hours);
+
+		SIZE sz;
+		GetTextExtentPoint32W(dc, txt, (int) wcslen(txt), &sz);
+		int bw = sz.cx + px(s, 10), bh = font_h + px(s, 4);
+		int x0 = u->hover_x - bw / 2;
+		if (x0 < 0) x0 = 0;
+		if (x0 + bw > w) x0 = w - bw;
+		RECT box = { x0, l.bar.top - bh - px(s, 4), x0 + bw, l.bar.top - px(s, 4) };
+		if (box.top >= 0) {
+			dim(dc, &box, 190);
+			DrawTextW(dc, txt, -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		}
 	}
 
-	DragFinish(drop);
+	SelectObject(dc, old);
 }
 
-void display_timer (HWND hwnd, HDC xdc) {
+static void draw_text_box (HDC dc, const UI *u, const wchar_t *text, bool center, int w, int h) {
 
-	RECT r = bar_rect(hwnd);
+	HGDIOBJ old = SelectObject(dc, font);
+	SetBkMode(dc, TRANSPARENT);
+	SetTextColor(dc, RGB(230, 230, 230));
 
-	hor = (ms/3600000) % 60; min = (ms/60000) % 60; seg = (ms/1000) % 60;
-	swprintf(time_1, 64, L"%.2d:%.2d:%.2d", hor, min, seg);
-
-	swprintf(str, BUFLEN, L"[%lc] %ls [%ls] %ls", s, time_1, barra(ms, _ms), time_2);
-	if ((size_t) win_w < wcslen(str) * ((BAR_FONT_H / 2) + 1))
-		swprintf(str, BUFLEN, L"[%ls]", barra(ms, _ms));
-
-	FillRect(xdc, &r, back_brush);
-	set_color(xdc, GRAY, BLACK);
-	DrawTextW(xdc, str, -1, &r, DT_CENTER | DT_SINGLELINE);
-}
-
-void toggle_fullscreen (HWND hwnd) {
-
-	if (!fullscreen) {
-		GetWindowRect(hwnd, &saved_rect);
-
-		/* monitor where the window is, not just the primary one */
-		MONITORINFO mi = { .cbSize = sizeof(MONITORINFO) };
-		if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
-			return;
-
-		fullscreen = true;
-		win_x = mi.rcMonitor.left;
-		win_y = mi.rcMonitor.top;
-		win_w = mi.rcMonitor.right  - mi.rcMonitor.left;
-		win_h = mi.rcMonitor.bottom - mi.rcMonitor.top - win_z;
+	if (center) {
+		RECT r = { px(u->scale, 8), 0, w - px(u->scale, 8), h - (u->bar ? px(u->scale, BAR_H) : 0) };
+		SetTextColor(dc, RGB(150, 150, 150));
+		DrawTextW(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 	} else {
-		fullscreen = false;
-		win_x = saved_rect.left;
-		win_y = saved_rect.top;
-		size_from_width(saved_rect.right - saved_rect.left);
+		RECT m = { 0, 0, w - px(u->scale, 16), h };
+		DrawTextW(dc, text, -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+		int pad = px(u->scale, 6);
+		RECT box = { px(u->scale, 8), px(u->scale, 8), 0, 0 };
+		box.right  = box.left + (m.right - m.left) + 2 * pad;
+		box.bottom = box.top + font_h + pad;
+		if (box.right > w - px(u->scale, 8))
+			box.right = w - px(u->scale, 8);
+		dim(dc, &box, 170);
+		DrawTextW(dc, text, -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 	}
 
-	player_layout(hwnd);
-	InvalidateRect(hwnd, NULL, FALSE);
+	SelectObject(dc, old);
 }
 
-void zoom (HWND hwnd, int dir) {
+/* playback position, from either backend */
+static double be_time (int backend) {
 
-	if (fullscreen)
+	EnterCriticalSection(&elock);
+	double t = (backend == BK_DS ? ds_time() : IMFMediaEngine_GetCurrentTime(engine));
+	LeaveCriticalSection(&elock);
+	return t;
+}
+
+static void draw (const UI *u, int w, int h) {
+
+	ID3D11Texture2D *tex  = NULL;
+	IDXGISurface1   *surf = NULL;
+	HDC dc = NULL;
+	bool framed = false;
+	double t = 0;
+
+	if (FAILED(IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **) &tex)))
 		return;
 
-	int step = win_w / 16;
-	if (step < 1)
-		step = 1;
+	/* Media Foundation: the GPU copies (and scales) the frame into the buffer */
+	if (u->loaded && u->has_video && u->backend == BK_MF) {
+		RECT   dst   = { 0, 0, w, h };
+		MFARGB black = { 0, 0, 0, 255 };
+		EnterCriticalSection(&elock);
+		framed = SUCCEEDED(IMFMediaEngine_TransferVideoFrame(engine, (IUnknown *) tex, NULL, &dst, &black));
+		LeaveCriticalSection(&elock);
+	}
 
-	size_from_width(win_w + (dir > 0 ? step : -step));
-	player_layout(hwnd);
+	/* DirectShow, NV12: the GPU converts and scales the frame */
+	if (u->loaded && u->has_video && u->backend == BK_DS)
+		framed = ds_draw_gpu(device, tex, w, h);
+	if (u->loaded)
+		t = be_time(u->backend);
+	if (u->seeking)
+		t = u->seek_to;
+
+	if (SUCCEEDED(ID3D11Texture2D_QueryInterface(tex, &IID_IDXGISurface1, (void **) &surf))
+	 && SUCCEEDED(IDXGISurface1_GetDC(surf, FALSE, &dc))) {
+
+		/* DirectShow, RGB32: the frame from the grabber, stretched with GDI */
+		if (!framed && u->loaded && u->has_video && u->backend == BK_DS)
+			framed = ds_draw(dc, w, h);
+
+		if (!framed) {
+			RECT all = { 0, 0, w, h };
+			fill(dc, &all, RGB(0, 0, 0));
+			if (u->idle[0])
+				draw_text_box(dc, u, u->idle, true, w, h);
+		}
+		if (u->bar && u->loaded)
+			draw_bar(dc, u, w, h, t);
+		if (u->osd[0])
+			draw_text_box(dc, u, u->osd, false, w, h);
+
+		IDXGISurface1_ReleaseDC(surf, NULL);
+	}
+
+	if (surf)
+		IDXGISurface1_Release(surf);
+	ID3D11Texture2D_Release(tex);
+
+	IDXGISwapChain_Present(swap, 0, 0);
+}
+
+static DWORD WINAPI render_main (LPVOID arg) {
+
+	(void) arg;
+	int    bw = 0, bh = 0;      /* back buffer size */
+	long   last_sec = -1;
+	UI     u;
+
+	CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+	BITMAPINFO bi = { .bmiHeader = { sizeof(BITMAPINFOHEADER), 1, 1, 1, 32, BI_RGB, 0, 0, 0, 0, 0 } };
+	void *bits;
+	dim_dc  = CreateCompatibleDC(NULL);
+	dim_bmp = CreateDIBSection(dim_dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+	SelectObject(dim_dc, dim_bmp);
+
+	while (!quitting) {
+
+		EnterCriticalSection(&lock);
+		u = ui;
+		ui.dirty = false;
+		LeaveCriticalSection(&lock);
+
+		if (u.scale != font_scale) {
+			make_font(u.scale);
+			u.dirty = true;
+			continue;  /* takes the new text widths */
+		}
+
+		RECT cr;
+		GetClientRect(hwnd, &cr);
+		int  w = cr.right, h = cr.bottom;
+		bool active = u.visible && u.loaded;
+
+		if (!u.visible || (!active && !u.dirty && w == bw && h == bh)) {
+			WaitForSingleObject(wake, INFINITE);
+			continue;
+		}
+
+		/* one pass per composition: paces the loop at the refresh rate */
+		if (active && FAILED(DwmFlush()))
+			Sleep(5);
+
+		bool redraw = u.dirty;
+
+		/* any reference left to the back buffer makes this fail: then the old
+		   size stays and the next pass tries again */
+		if ((w != bw || h != bh) && w > 0 && h > 0
+		 && SUCCEEDED(IDXGISwapChain_ResizeBuffers(swap, 0, (UINT) w, (UINT) h, DXGI_FORMAT_UNKNOWN,
+		                                           DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE))) {
+			bw = w;
+			bh = h;
+			redraw = true;
+		}
+
+		if (active && u.has_video) {
+			if (u.backend == BK_DS) {
+				if (ds_fresh())
+					redraw = true;
+			} else {
+				LONGLONG pts;
+				EnterCriticalSection(&elock);
+				if (IMFMediaEngine_OnVideoStreamTick(engine, &pts) == S_OK)
+					redraw = true;
+				LeaveCriticalSection(&elock);
+			}
+		}
+
+		/* audio only, or a paused bar: the clock still has to move */
+		if (active && u.bar && !redraw) {
+			long sec = (long) be_time(u.backend);
+			if (sec != last_sec) {
+				last_sec = sec;
+				redraw = true;
+			}
+		}
+
+		if (redraw && bw > 0)
+			draw(&u, bw, bh);
+	}
+
+	ds_gpu_release();
+	if (font)
+		DeleteObject(font);
+	DeleteDC(dim_dc);
+	DeleteObject(dim_bmp);
+	CoUninitialize();
+	return 0;
+}
+
+static void render_stop (void) {
+
+	if (render_thread) {
+		InterlockedExchange(&quitting, 1);
+		SetEvent(wake);
+		WaitForSingleObject(render_thread, INFINITE);
+		CloseHandle(render_thread);
+		render_thread = NULL;
+	}
+}
+
+/* ========================================================================== */
+/* media engine                                                               */
+/* ========================================================================== */
+
+static HRESULT STDMETHODCALLTYPE nt_query (IMFMediaEngineNotify *self, REFIID riid, void **out) {
+
+	if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IMFMediaEngineNotify)) {
+		*out = self;
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+
+/* static object: reference counting does nothing */
+static ULONG STDMETHODCALLTYPE nt_ref (IMFMediaEngineNotify *self) {
+
+	(void) self;
+	return 1;
+}
+
+/* runs on a Media Foundation thread: hand the event to the window */
+static HRESULT STDMETHODCALLTYPE nt_event (IMFMediaEngineNotify *self, DWORD ev, DWORD_PTR p1, DWORD p2) {
+
+	(void) self;
+	(void) p1;
+	if (ev == MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA || ev == MF_MEDIA_ENGINE_EVENT_ERROR
+	 || ev == MF_MEDIA_ENGINE_EVENT_FORMATCHANGE)
+		PostMessageW(hwnd, WM_ENGINE, ev, (LPARAM) p2);
+	return S_OK;
+}
+
+static IMFMediaEngineNotifyVtbl notify_vtbl = { nt_query, nt_ref, nt_ref, nt_event };
+static IMFMediaEngineNotify     notify      = { &notify_vtbl };
+
+static bool d3d_init (int w, int h) {
+
+	DXGI_SWAP_CHAIN_DESC sd = { 0 };
+	sd.BufferDesc.Width  = (UINT) w;
+	sd.BufferDesc.Height = (UINT) h;
+	sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	sd.SampleDesc.Count  = 1;
+	sd.BufferUsage       = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	sd.BufferCount       = 1;
+	sd.OutputWindow      = hwnd;
+	sd.Windowed          = TRUE;
+	sd.SwapEffect        = DXGI_SWAP_EFFECT_DISCARD;  /* blt model: works with layered windows */
+	sd.Flags             = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+
+	UINT flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+	HRESULT hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags,
+	                                           NULL, 0, D3D11_SDK_VERSION, &sd, &swap, &device, NULL, NULL);
+	if (FAILED(hr))
+		hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_WARP, NULL, flags,
+		                                   NULL, 0, D3D11_SDK_VERSION, &sd, &swap, &device, NULL, NULL);
+	if (FAILED(hr))
+		return false;
+
+	/* the engine uses the device from its own threads */
+	ID3D10Multithread *mt;
+	if (SUCCEEDED(ID3D11Device_QueryInterface(device, &IID_ID3D10Multithread, (void **) &mt))) {
+		ID3D10Multithread_SetMultithreadProtected(mt, TRUE);
+		ID3D10Multithread_Release(mt);
+	}
+
+	/* Alt+Enter is ours (borderless fullscreen), not DXGI's */
+	IDXGIFactory *f;
+	if (SUCCEEDED(IDXGISwapChain_GetParent(swap, &IID_IDXGIFactory, (void **) &f))) {
+		IDXGIFactory_MakeWindowAssociation(f, hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+		IDXGIFactory_Release(f);
+	}
+	return true;
+}
+
+static bool engine_init (void) {
+
+	UINT token;
+	IMFAttributes *attr = NULL;
+	IMFMediaEngineClassFactory *cf = NULL;
+	HRESULT hr;
+
+	hr = MFCreateDXGIDeviceManager(&token, &dxgi_mgr);
+	if (SUCCEEDED(hr))
+		hr = IMFDXGIDeviceManager_ResetDevice(dxgi_mgr, (IUnknown *) device, token);
+	if (SUCCEEDED(hr))
+		hr = MFCreateAttributes(&attr, 3);
+	if (SUCCEEDED(hr)) {
+		IMFAttributes_SetUnknown(attr, &MF_MEDIA_ENGINE_DXGI_MANAGER, (IUnknown *) dxgi_mgr);
+		IMFAttributes_SetUnknown(attr, &MF_MEDIA_ENGINE_CALLBACK, (IUnknown *) &notify);
+		IMFAttributes_SetUINT32(attr, &MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM);
+		hr = CoCreateInstance(&CLSID_MFMediaEngineClassFactory, NULL, CLSCTX_INPROC_SERVER,
+		                      &IID_IMFMediaEngineClassFactory, (void **) &cf);
+	}
+	if (SUCCEEDED(hr))
+		hr = IMFMediaEngineClassFactory_CreateInstance(cf, 0, attr, &engine);
+	if (SUCCEEDED(hr)) {
+		IMFMediaEngine_QueryInterface(engine, &IID_IMFMediaEngineEx, (void **) &engine_ex);
+		IMFMediaEngine_SetLoop(engine, TRUE);
+		IMFMediaEngine_SetAutoPlay(engine, TRUE);
+	}
+
+	if (cf)
+		IMFMediaEngineClassFactory_Release(cf);
+	if (attr)
+		IMFAttributes_Release(attr);
+	return SUCCEEDED(hr);
+}
+
+static void open_file (const wchar_t *path) {
+
+	wcsncpy(file_name, path, PATHLEN - 1);
+	file_name[PATHLEN - 1] = L'\0';
+
+	EnterCriticalSection(&lock);
+	ui.backend   = BK_MF;
+	ui.loaded    = false;
+	ui.has_video = false;
+	ui.paused    = false;
+	ui.duration  = 0;
+	wcsncpy(ui.idle, base_name(file_name), PATHLEN - 1);
+	ui_changed();
+	LeaveCriticalSection(&lock);
+
+	SetWindowTextW(hwnd, base_name(file_name));
+
+	BSTR url = SysAllocString(file_name);
+	EnterCriticalSection(&elock);
+	ds_close();
+	IMFMediaEngine_SetSource(engine, url);
+	IMFMediaEngine_Play(engine);
+	LeaveCriticalSection(&elock);
+	SysFreeString(url);
+}
+
+static void set_paused (bool p) {
+
+	if (!ui.loaded)
+		return;
+
+	EnterCriticalSection(&elock);
+	if (ui.backend == BK_DS)
+		p ? ds_pause() : ds_play();
+	else if (p)
+		IMFMediaEngine_Pause(engine);
+	else
+		IMFMediaEngine_Play(engine);
+	LeaveCriticalSection(&elock);
+
+	EnterCriticalSection(&lock);
+	ui.paused = p;
+	ui_changed();
+	LeaveCriticalSection(&lock);
+}
+
+static double current_time (void) {
+
+	return be_time(ui.backend);
+}
+
+/* approximate: nearest keyframe, for dragging; exact: where it was released */
+static void seek (double t, bool exact) {
+
+	if (!ui.loaded || ui.duration <= 0)
+		return;
+
+	if (t < 0)
+		t = 0;
+	if (t > ui.duration - 0.1)
+		t = ui.duration - 0.1;
+
+	EnterCriticalSection(&elock);
+	if (ui.backend == BK_DS)
+		ds_seek(t, exact);
+	else if (engine_ex)
+		IMFMediaEngineEx_SetCurrentTimeEx(engine_ex, t, exact ? MF_MEDIA_ENGINE_SEEK_MODE_NORMAL
+		                                                      : MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE);
+	else
+		IMFMediaEngine_SetCurrentTime(engine, t);
+	LeaveCriticalSection(&elock);
+}
+
+/* DirectShow seeks are synchronous: never busy */
+static bool engine_busy_seeking (void) {
+
+	if (ui.backend == BK_DS)
+		return false;
+
+	EnterCriticalSection(&elock);
+	bool b = IMFMediaEngine_IsSeeking(engine);
+	LeaveCriticalSection(&elock);
+	return b;
+}
+
+static void apply_volume (void) {
+
+	EnterCriticalSection(&elock);
+	IMFMediaEngine_SetVolume(engine, volume);
+	IMFMediaEngine_SetMuted(engine, muted);
+	if (ui.backend == BK_DS)
+		ds_volume(volume, muted);
+	LeaveCriticalSection(&elock);
 }
 
 /* ========================================================================== */
 /* window                                                                     */
 /* ========================================================================== */
 
-LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+static RECT work_area (void) {
 
-	PAINTSTRUCT ps;
+	MONITORINFO mi = { .cbSize = sizeof(mi) };
+	GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+	return mi.rcWork;
+}
+
+static int min_w (void) {
+
+	return px(ui.scale, MIN_W);
+}
+
+/* new size keeping the corner of the screen the window is closest to */
+static void resize_anchored (int w, int h) {
+
+	RECT r, wa = work_area();
+	GetWindowRect(hwnd, &r);
+
+	int x = ((r.left + r.right) / 2 > (wa.left + wa.right) / 2 ? r.right - w : r.left);
+	int y = ((r.top + r.bottom) / 2 > (wa.top + wa.bottom) / 2 ? r.bottom - h : r.top);
+
+	SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+}
+
+static void size_from_width (int w) {
+
+	if (w < min_w())
+		w = min_w();
+
+	RECT r;
+	GetWindowRect(hwnd, &r);
+	int h = (aspect > 0 ? (int) (w / aspect + 0.5) : r.bottom - r.top);
+	resize_anchored(w, h);
+}
+
+static void zoom (int dir) {
+
+	if (fullscreen)
+		return;
+
+	RECT r;
+	GetWindowRect(hwnd, &r);
+	int w = r.right - r.left;
+	int step = w / 10;
+	size_from_width(w + (dir > 0 ? step : -step));
+}
+
+static void toggle_fullscreen (void) {
+
+	if (!fullscreen) {
+		MONITORINFO mi = { .cbSize = sizeof(mi) };
+		if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+			return;
+		GetWindowRect(hwnd, &saved_rect);
+		fullscreen = true;
+		SetWindowPos(hwnd, HWND_TOPMOST, mi.rcMonitor.left, mi.rcMonitor.top,
+		             mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+		             SWP_NOACTIVATE);
+	} else {
+		fullscreen = false;
+		SetWindowPos(hwnd, HWND_TOPMOST, saved_rect.left, saved_rect.top,
+		             saved_rect.right - saved_rect.left, saved_rect.bottom - saved_rect.top,
+		             SWP_NOACTIVATE);
+	}
+}
+
+static void set_alpha (int a) {
+
+	win_alpha = (a > 255 ? 255 : (a < 25 ? 25 : a));
+	LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+	/* fully opaque: no layered window at all, the common path stays plain */
+	if (win_alpha == 255)
+		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+	else {
+		if (!(ex & WS_EX_LAYERED))
+			SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+		SetLayeredWindowAttributes(hwnd, 0, (BYTE) win_alpha, LWA_ALPHA);
+	}
+	osd(1000, L"opacity %d%%", win_alpha * 100 / 255);
+}
+
+static void set_volume (double v) {
+
+	volume = (v > 1 ? 1 : (v < 0 ? 0 : v));
+	apply_volume();
+	osd(1000, L"volume %d%%", (int) (volume * 100 + 0.5));
+}
+
+static void toggle_mute (void) {
+
+	muted = !muted;
+	apply_volume();
+	osd(1000, muted ? L"muted" : L"sound on");
+}
+
+static void show_bar (void) {
+
+	last_activity = GetTickCount64();
+	if (!ui.bar) {
+		EnterCriticalSection(&lock);
+		ui.bar = true;
+		ui_changed();
+		LeaveCriticalSection(&lock);
+	}
+}
+
+static void hide_player (void) {
+
+	if (!ui.visible)
+		return;
+
+	hidden_paused = (ui.loaded && !ui.paused);
+	if (hidden_paused)
+		set_paused(true);
+
+	EnterCriticalSection(&lock);
+	ui.visible = false;
+	ui.bar     = false;
+	ui_changed();
+	LeaveCriticalSection(&lock);
+	ShowWindow(hwnd, SW_HIDE);
+}
+
+static void show_player (void) {
+
+	if (ui.visible)
+		return;
+
+	EnterCriticalSection(&lock);
+	ui.visible = true;
+	ui_changed();
+	LeaveCriticalSection(&lock);
+
+	ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+	SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	if (hidden_paused)
+		set_paused(false);
+	hidden_paused = false;
+}
+
+/* the file is open (either backend): window size, bar, duration */
+static void apply_media (bool video, int vw, int vh, double pic_aspect, double dur) {
+
+	if (!isfinite(dur) || dur < 0)
+		dur = 0;
+
+	video = video && vw > 0 && vh > 0;
+
+	EnterCriticalSection(&lock);
+	ui.loaded    = true;
+	ui.has_video = video;
+	ui.duration  = dur;
+	if (!video)
+		ui.bar = true;  /* audio: the bar is all there is to see */
+	ui_changed();
+	LeaveCriticalSection(&lock);
+
+	if (video) {
+		aspect = (pic_aspect > 0 ? pic_aspect : (double) vw / vh);
+		vid_w  = (int) (vh * aspect + 0.5);
+	} else
+		aspect = 0;
+
+	if (fullscreen)
+		return;
+
+	RECT r;
+	GetWindowRect(hwnd, &r);
+	if (video)
+		size_from_width(first_size ? vid_w / 6 : r.right - r.left);
+	else
+		resize_anchored(r.right - r.left, px(ui.scale, BAR_H) * 3);
+	first_size = false;
+}
+
+static void on_metadata (void) {
+
+	DWORD vw = 0, vh = 0, ax = 0, ay = 0;
+
+	EnterCriticalSection(&elock);
+	BOOL   video = IMFMediaEngine_HasVideo(engine);
+	double dur   = IMFMediaEngine_GetDuration(engine);
+	if (video) {
+		IMFMediaEngine_GetNativeVideoSize(engine, &vw, &vh);
+		/* the picture aspect (4:3, 16:9), not the pixel one */
+		IMFMediaEngine_GetVideoAspectRatio(engine, &ax, &ay);
+	}
+	LeaveCriticalSection(&elock);
+
+	apply_volume();
+	apply_media(video, (int) vw, (int) vh, (ax > 0 && ay > 0 ? (double) ax / ay : 0), dur);
+}
+
+/* Media Foundation gave up on the file: the DirectShow filters of the system get a try */
+static bool try_dshow (void) {
+
+	EnterCriticalSection(&elock);
+	IMFMediaEngine_Pause(engine);
+	bool ok = ds_open(file_name, hwnd, WM_DSHOW, wake);
+	LeaveCriticalSection(&elock);
+	if (!ok)
+		return false;
+
+	int vw = 0, vh = 0;
+	bool video = ds_has_video();
+	if (video)
+		ds_video_size(&vw, &vh);
+
+	EnterCriticalSection(&lock);
+	ui.backend = BK_DS;
+	ui.paused  = false;
+	LeaveCriticalSection(&lock);
+
+	apply_volume();
+	apply_media(video, vw, vh, 0, ds_duration());
+	return true;
+}
+
+static void on_engine_error (HRESULT hr) {
+
+	if (ui.backend == BK_MF && try_dshow())
+		return;
+
+	EnterCriticalSection(&elock);
+	ds_close();
+	LeaveCriticalSection(&elock);
+
+	EnterCriticalSection(&lock);
+	ui.backend   = BK_MF;
+	ui.loaded    = false;
+	ui.has_video = false;
+	ui_changed();
+	LeaveCriticalSection(&lock);
+	switch ((unsigned long) hr) {
+		case 0xC00D5212: /* MF_E_TOPO_CODEC_NOT_FOUND */
+		case 0x80040265: /* VFW_E_CANNOT_RENDER */
+			osd(6000, L"no decoder for this video");
+			break;
+		case 0xC00D36C4: /* MF_E_UNSUPPORTED_BYTESTREAM_TYPE */
+			osd(6000, L"unsupported file format");
+			break;
+		case 0x80070002: /* ERROR_FILE_NOT_FOUND */
+		case 0x80070003:
+			osd(6000, L"file not found");
+			break;
+		default:
+			osd(6000, L"cannot play (0x%08lx)", (unsigned long) hr);
+			break;
+	}
+}
+
+/* re-raise to the top of the topmost band whenever another window takes the
+   foreground (Alt+Tab included): other topmost windows otherwise win */
+static void CALLBACK on_winevent (HWINEVENTHOOK h, DWORD ev, HWND w, LONG obj, LONG child,
+                                  DWORD thread, DWORD ms) {
+
+	(void) h; (void) w; (void) obj; (void) child; (void) thread; (void) ms;
+
+	if (ui.visible && (ev == EVENT_SYSTEM_FOREGROUND || ev == EVENT_SYSTEM_SWITCHEND
+	                || ev == EVENT_SYSTEM_MINIMIZEEND))
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+		             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
+static void update_hover (int x, int y) {
+
+	RECT c;
+	GetClientRect(hwnd, &c);
+
+	EnterCriticalSection(&lock);
+	LAYOUT l = layout(c.right, c.bottom, &ui);
+	int  hx  = -1;
+	bool hb  = false;
+	if (ui.bar && ui.loaded && in_rect(&l.bar, x, y)) {
+		if (x >= l.track.left && x < l.track.right)
+			hx = x;
+		hb = in_rect(&l.btn, x, y);
+	}
+	if (hx != ui.hover_x || hb != ui.hover_btn) {
+		ui.hover_x   = hx;
+		ui.hover_btn = hb;
+		ui_changed();
+	}
+	LeaveCriticalSection(&lock);
+}
+
+/* WM_MOUSEMOVE also comes when the window moves under a still cursor:
+   only a real movement shows the bar */
+static void mouse_moved (int x, int y) {
+
+	if (x != last_mouse.x || y != last_mouse.y) {
+		last_mouse = (POINT) { x, y };
+		show_bar();
+	}
+}
+
+static void seek_drag (int x) {
+
+	RECT c;
+	GetClientRect(hwnd, &c);
+	LAYOUT l = layout(c.right, c.bottom, &ui);
+
+	int tw = l.track.right - l.track.left;
+	double frac = (tw > 0 ? (double) (x - l.track.left) / tw : 0);
+	if (frac < 0) frac = 0;
+	if (frac > 1) frac = 1;
+
+	EnterCriticalSection(&lock);
+	ui.seek_to = frac * ui.duration;
+	ui.hover_x = (x < l.track.left ? l.track.left : (x >= l.track.right ? l.track.right - 1 : x));
+	ui_changed();
+	LeaveCriticalSection(&lock);
+
+	/* one seek in flight at a time: the timer sends the latest target */
+	if (engine_busy_seeking())
+		seek_pending = true;
+	else {
+		seek(ui.seek_to, false);
+		seek_pending = false;
+	}
+}
+
+static void on_timer (void) {
+
+	/* global keys: they work without focus, read every tick */
+	static bool was_home, was_end;
+	bool home = !!(GetAsyncKeyState(VK_HOME) & 0x8000);
+	bool end  = !!(GetAsyncKeyState(VK_END)  & 0x8000);
+	if (home && !was_home)
+		hide_player();
+	if (end && !was_end)
+		show_player();
+	was_home = home;
+	was_end  = end;
+
+	ULONGLONG now = GetTickCount64();
+
+	if (ui.seeking && seek_pending && !engine_busy_seeking()) {
+		seek(ui.seek_to, false);
+		seek_pending = false;
+	}
+
+	/* the bar goes away as soon as the cursor leaves the window, or after a
+	   while without moving; it stays while paused, seeking or under the cursor */
+	if (ui.bar && ui.loaded && ui.has_video && !ui.paused && !ui.seeking) {
+		POINT p;
+		RECT  c;
+		GetCursorPos(&p);
+		ScreenToClient(hwnd, &p);
+		GetClientRect(hwnd, &c);
+		LAYOUT l = layout(c.right, c.bottom, &ui);
+		bool out = !in_rect(&c, p.x, p.y);
+		if (out || (now - last_activity > HIDE_MS && !in_rect(&l.bar, p.x, p.y))) {
+			EnterCriticalSection(&lock);
+			ui.bar = false;
+			ui_changed();
+			LeaveCriticalSection(&lock);
+			last_mouse = (POINT) { -1, -1 };
+		}
+	}
+
+	if (ui.osd[0] && now > osd_until) {
+		EnterCriticalSection(&lock);
+		ui.osd[0] = L'\0';
+		ui_changed();
+		LeaveCriticalSection(&lock);
+	}
+}
+
+static bool bar_click (int x, int y) {
+
+	if (!ui.bar || !ui.loaded)
+		return false;
+
+	RECT c;
+	GetClientRect(hwnd, &c);
+	LAYOUT l = layout(c.right, c.bottom, &ui);
+	if (!in_rect(&l.bar, x, y))
+		return false;
+
+	if (in_rect(&l.btn, x, y))
+		set_paused(!ui.paused);
+	else if (ui.duration > 0 && x >= l.track.left - px(ui.scale, 6) && x < l.track.right + px(ui.scale, 6)) {
+		EnterCriticalSection(&lock);
+		ui.seeking = true;
+		LeaveCriticalSection(&lock);
+		SetCapture(hwnd);
+		seek_drag(x);
+	}
+	return true;  /* clicks on the bar never move the window */
+}
+
+static void on_key (WPARAM k) {
+
+	switch (k) {
+		case VK_SPACE:
+			set_paused(!ui.paused);
+			show_bar();
+			break;
+		case VK_UP:
+			set_paused(false);
+			break;
+		case VK_DOWN:
+			set_paused(true);
+			show_bar();
+			break;
+		case VK_LEFT:
+		case VK_RIGHT:
+			seek(current_time() + (k == VK_LEFT ? -SEEK_STEP : SEEK_STEP), true);
+			show_bar();
+			break;
+		case VK_F12:
+			seek(0, true);
+			set_paused(false);
+			show_bar();
+			break;
+		case 'M':
+			toggle_mute();
+			break;
+		case VK_PRIOR:
+			set_alpha(win_alpha + 25);
+			break;
+		case VK_NEXT:
+			set_alpha(win_alpha - 25);
+			break;
+		case VK_OEM_PLUS:
+		case VK_ADD:
+			zoom(+1);
+			break;
+		case VK_OEM_MINUS:
+		case VK_SUBTRACT:
+			zoom(-1);
+			break;
+		case '0':
+			if (!fullscreen && vid_w > 0)
+				size_from_width(vid_w / 6);
+			break;
+		case 'F':
+			toggle_fullscreen();
+			break;
+		case VK_ESCAPE:
+			if (fullscreen)
+				toggle_fullscreen();
+			break;
+		case 'Q':
+			PostMessageW(hwnd, WM_CLOSE, 0, 0);
+			break;
+		default:
+			break;
+	}
+}
+
+static LRESULT CALLBACK WndProc (HWND w, UINT msg, WPARAM wparam, LPARAM lparam) {
 
 	switch (msg) {
-		case WM_CREATE:
-			DragAcceptFiles(hwnd, TRUE);
-			SetLayeredWindowAttributes(hwnd, 0, (BYTE) win_alpha, LWA_ALPHA);
 
-			/* one font for the whole process: recreating it on every WM_PAINT
-			   would cost 20 CreateFont calls per second for no gain */
-			font = CreateFontW(
-				BAR_FONT_H, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
-				FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-				CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-				DEFAULT_PITCH | FF_ROMAN, L"Lucida Console"
-			);
+		case WM_NCHITTEST: {
+				if (fullscreen)
+					return HTCLIENT;
 
-			if (*file_name)
-				create_player(hwnd, file_name);
+				POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+				RECT  c;
+				ScreenToClient(w, &p);
+				GetClientRect(w, &c);
 
-			if (SetTimer(hwnd, ID_TIMER, 50, NULL) == 0)
-				MessageBoxW(hwnd, L"Could not SetTimer()!", L"Error",
-				            MB_OK | MB_ICONEXCLAMATION);
-			break;
+				int  e = px(ui.scale, EDGE);
+				bool l = p.x < e, r = p.x >= c.right - e;
+				bool t = p.y < e, b = p.y >= c.bottom - e;
 
-		case WM_MOUSEWHEEL: {
-				int dir = ((short) HIWORD(wparam) < 0 ? -1 : 1);
+				if (t && l) return HTTOPLEFT;
+				if (t && r) return HTTOPRIGHT;
+				if (b && l) return HTBOTTOMLEFT;
+				if (b && r) return HTBOTTOMRIGHT;
+				if (l)      return HTLEFT;
+				if (r)      return HTRIGHT;
+				if (t)      return HTTOP;
+				if (b)      return HTBOTTOM;
 
-				if (GetKeyState(VK_CONTROL) & 0x8000)
-					set_volume(volume + dir * 50);
-				else if (GetKeyState(VK_SHIFT) & 0x8000)
-					set_alpha(hwnd, win_alpha + dir * 10);
-				else
-					zoom(hwnd, dir);
-			}
-			break;
-
-		case WM_LBUTTONDOWN: {
-				RECT r;
-				GetWindowRect(hwnd, &r);
-				GetCursorPos(&drag_from);
-				drag_off.x = drag_from.x - r.left;
-				drag_off.y = drag_from.y - r.top;
-				drag_armed = true;
-				dragging   = false;
-				SetCapture(hwnd);
-			}
-			break;
-
-		case WM_MOUSEMOVE:
-			if (drag_armed) {
-				POINT p;
-				GetCursorPos(&p);
-
-				/* it only becomes a drag after leaving the tolerance:
-				   assim um clique parado continua sendo um clique */
-				if (!dragging
-				 && (abs(p.x - drag_from.x) > DRAG_TOL || abs(p.y - drag_from.y) > DRAG_TOL))
-					dragging = true;
-
-				if (dragging && !fullscreen) {
-					win_x = p.x - drag_off.x;
-					win_y = p.y - drag_off.y;
-					MoveWindow(hwnd, win_x, win_y, win_w, win_h + win_z, FALSE);
+				/* the bar takes clicks; the rest of the video works as a title
+				   bar, so the system moves the window */
+				if (ui.bar && ui.loaded) {
+					LAYOUT lay = layout(c.right, c.bottom, &ui);
+					if (in_rect(&lay.bar, p.x, p.y))
+						return HTCLIENT;
 				}
+				return HTCAPTION;
+			}
+
+		case WM_NCMOUSEMOVE: {
+				if (!nc_tracking) {
+					TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE | TME_NONCLIENT, w, 0 };
+					nc_tracking = TrackMouseEvent(&tme);
+				}
+				POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+				ScreenToClient(w, &p);
+				mouse_moved(p.x, p.y);
+				update_hover(p.x, p.y);
+			}
+			break;
+
+		case WM_NCMOUSELEAVE:
+			nc_tracking = false;
+			update_hover(-1, -1);
+			break;
+
+		/* a double click on the video (the "title bar") is fullscreen, not maximize */
+		case WM_NCLBUTTONDBLCLK:
+			if (wparam == HTCAPTION) {
+				toggle_fullscreen();
+				return 0;
+			}
+			break;
+
+		/* keeps the video aspect while an edge is dragged */
+		case WM_SIZING:
+			if (aspect > 0) {
+				RECT *r = (RECT *) lparam;
+				int   ww = r->right - r->left, hh = r->bottom - r->top;
+
+				if (wparam == WMSZ_TOP || wparam == WMSZ_BOTTOM) {
+					ww = (int) (hh * aspect + 0.5);
+					r->right = r->left + ww;
+				} else {
+					hh = (int) (ww / aspect + 0.5);
+					if (wparam == WMSZ_TOP || wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT)
+						r->top = r->bottom - hh;
+					else
+						r->bottom = r->top + hh;
+				}
+				return TRUE;
+			}
+			break;
+
+		case WM_GETMINMAXINFO: {
+				MINMAXINFO *mm = (MINMAXINFO *) lparam;
+				mm->ptMinTrackSize.x = min_w();
+				mm->ptMinTrackSize.y = (aspect > 0 ? (int) (min_w() / aspect + 0.5) : px(ui.scale, BAR_H) * 2);
+			}
+			return 0;
+
+		/* nothing takes it out of the topmost band */
+		case WM_WINDOWPOSCHANGING: {
+				WINDOWPOS *wp = (WINDOWPOS *) lparam;
+				if (!(wp->flags & SWP_NOZORDER) && wp->hwndInsertAfter != HWND_TOPMOST)
+					wp->hwndInsertAfter = HWND_TOPMOST;
+			}
+			break;
+
+		case WM_SIZE:
+			EnterCriticalSection(&lock);
+			ui_changed();
+			LeaveCriticalSection(&lock);
+			return 0;
+
+		case WM_DPICHANGED: {
+				RECT *r = (RECT *) lparam;
+				EnterCriticalSection(&lock);
+				ui.scale = HIWORD(wparam) / 96.0f;
+				ui_changed();
+				LeaveCriticalSection(&lock);
+				SetWindowPos(w, HWND_TOPMOST, r->left, r->top, r->right - r->left, r->bottom - r->top,
+				             SWP_NOACTIVATE);
+			}
+			return 0;
+
+		case WM_MOUSEMOVE: {
+				int x = GET_X_LPARAM(lparam), y = GET_Y_LPARAM(lparam);
+
+				if (!tracking) {
+					TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, w, 0 };
+					tracking = TrackMouseEvent(&tme);
+				}
+
+				mouse_moved(x, y);
+
+				if (ui.seeking)
+					seek_drag(x);
+				else
+					update_hover(x, y);
+			}
+			break;
+
+		/* moving between the bar (client) and the video (caption) also "leaves":
+		   the timer hides the bar once the cursor is really out of the window */
+		case WM_MOUSELEAVE:
+			tracking = false;
+			update_hover(-1, -1);
+			break;
+
+		case WM_LBUTTONDOWN:
+			bar_click(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+			break;
+
+		case WM_LBUTTONDBLCLK: {
+				int x = GET_X_LPARAM(lparam), y = GET_Y_LPARAM(lparam);
+				if (!bar_click(x, y))
+					toggle_fullscreen();
 			}
 			break;
 
 		case WM_LBUTTONUP:
-			if (drag_armed) {
-				ReleaseCapture();
-
-				/* click without drag on the bottom strip: toggles the bar.
-				   only makes sense with video: with audio the bar is the whole window */
-				if (!dragging && vid_h > 0) {
-					POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
-					if (p.x >= 0 && p.x < win_w && p.y >= (win_h - BAR_H) && p.y < (win_h + win_z)) {
-						show_timer = !show_timer;
-						win_z = (show_timer ? BAR_H : 0);
-						player_layout(hwnd);
-						InvalidateRect(hwnd, NULL, TRUE);
-					}
-				}
-
-				drag_armed = false;
-				dragging   = false;
+			if (ui.seeking) {
+				EnterCriticalSection(&lock);
+				ui.seeking = false;
+				double t = ui.seek_to;
+				ui_changed();
+				LeaveCriticalSection(&lock);
+				seek_pending = false;
+				seek(t, true);
+				last_activity = GetTickCount64();
 			}
+			if (GetCapture() == w)
+				ReleaseCapture();
 			break;
 
-		case WM_DROPFILES:
-			drop_file(hwnd, wparam);
-			drag_armed = false;
-			dragging   = false;
+		case WM_MOUSEWHEEL: {
+				int dir = ((short) HIWORD(wparam) < 0 ? -1 : 1);
+				if (GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL)
+					set_volume(volume + dir * 0.05);
+				else if (GET_KEYSTATE_WPARAM(wparam) & MK_SHIFT)
+					set_alpha(win_alpha + dir * 25);
+				else
+					zoom(dir);
+			}
 			break;
 
 		case WM_KEYDOWN:
-			switch (wparam) {
-				case VK_LEFT: /* back */
-					s = '<';
-					player_play_from(ms - SEEK_MS);
-					break;
-				case VK_RIGHT: /* forward */
-					s = '>';
-					player_play_from(ms + SEEK_MS);
-					break;
-				case VK_UP: /* play */
-					player_resume();
-					break;
-				case VK_DOWN: /* pause */
-					player_pause();
-					break;
-				case VK_SPACE: /* play / pause */
-					if (paused)
-						player_resume();
-					else
-						player_pause();
-					break;
-				case 'M': /* mute */
-					muted = !muted;
-					if (player_ok)
-						mci(NULL, 0, L"setaudio _player_ %ls", muted ? L"off" : L"on");
-					break;
-				case VK_PRIOR: /* page_up (Alpha up) */
-					set_alpha(hwnd, win_alpha + 10);
-					break;
-				case VK_NEXT: /* page_down (Alpha down) */
-					set_alpha(hwnd, win_alpha - 10);
-					break;
-				case VK_OEM_PLUS:
-				case VK_ADD:
-					zoom(hwnd, +1);
-					break;
-				case VK_OEM_MINUS:
-				case VK_SUBTRACT:
-					zoom(hwnd, -1);
-					break;
-				case '0': /* reset original size */
-					if (!fullscreen) {
-						size_from_width(vid_w > 0 ? vid_w / 6 : MIN_W);
-						player_layout(hwnd);
-					}
-					break;
-				case VK_ESCAPE:
-					if (fullscreen)
-						toggle_fullscreen(hwnd);
-					break;
-				case 'Q':
-					PostMessageW(hwnd, WM_CLOSE, 0, 0);
-					break;
-				default: break;
-			}
+			on_key(wparam);
 			break;
 
 		case WM_SYSKEYDOWN:
 			if (wparam == VK_RETURN) {
-				toggle_fullscreen(hwnd);
+				toggle_fullscreen();
 				return 0;
 			}
-			return DefWindowProcW(hwnd, msg, wparam, lparam);
+			break;
 
-		case WM_TIMER: {
-
-				get_input();
-
-				/* gives the glyph back to play after showing << or >> */
-				static int count_s = 0;
-				if ((s == '>' || s == '<') && ++count_s >= 2) {
-					count_s = 0;
-					s = (paused ? 'X' : ':');
-				}
-
-				if (player_ok && visible && !paused) {
-					long p = mci_status(L"position");
-					if (p >= 0)
-						ms = (int) p;
-				}
-
-				/* global keys: they work even without window focus -
-				   that is why they come from GetAsyncKeyState and not from WM_KEYDOWN */
-				if (visible && key_press(VK_HOME)) {
-					visible = false;
-					show_timer = false;
-					win_z = 0;
-					player_pause();
-					ShowWindow(hwnd, SW_HIDE);
-				}
-				if (!visible && key_press(VK_END)) {
-					visible = true;
-					ShowWindow(hwnd, SW_SHOW);
-					player_layout(hwnd);
-					player_resume();
-				}
-				if (key_press(VK_F12)) {
-					s = ':';
-					player_play_from(0);
-				}
-
-				/* repaints the bar only when the text really changes:
-				   invalidating on every tick would give 20 repaints per second for nothing */
-				if (show_timer && visible) {
-					static int     last_sec = -1;
-					static wchar_t last_s   = 0;
-					int now = ms / 1000;
-					if (now != last_sec || s != last_s) {
-						last_sec = now;
-						last_s   = s;
-						RECT r = bar_rect(hwnd);
-						InvalidateRect(hwnd, &r, FALSE);
-					}
-				}
+		case WM_DROPFILES: {
+				wchar_t path[PATHLEN];
+				HDROP drop = (HDROP) wparam;
+				/* several files at once: only the first is played */
+				if (DragQueryFileW(drop, 0, path, PATHLEN) > 0)
+					open_file(path);
+				DragFinish(drop);
 			}
 			break;
 
-		/* without this the black background brush flickers over the video 20x per second */
-		case WM_ERASEBKGND: {
-				HDC dc = (HDC) wparam;
-				RECT r;
-				GetClientRect(hwnd, &r);
-				if (player_ok && vid_h > 0)
-					r.top = win_h;     /* the video covers the rest */
-				if (r.bottom > r.top)
-					FillRect(dc, &r, back_brush);
+		case WM_COPYDATA: {
+				COPYDATASTRUCT *cd = (COPYDATASTRUCT *) lparam;
+				if (cd->dwData == CD_OPEN && cd->lpData && cd->cbData >= sizeof(wchar_t)) {
+					wchar_t path[PATHLEN];
+					size_t  n = cd->cbData / sizeof(wchar_t);
+					if (n > PATHLEN - 1)
+						n = PATHLEN - 1;
+					memcpy(path, cd->lpData, n * sizeof(wchar_t));
+					path[n] = L'\0';
+					open_file(path);
+				}
+				if (cd->dwData == CD_OPEN || cd->dwData == CD_SHOW) {
+					hidden_paused = false;
+					show_player();
+				}
 			}
+			return TRUE;
+
+		case WM_DSHOW:
+			if (ui.backend == BK_DS) {
+				EnterCriticalSection(&elock);
+				HRESULT hr = ds_events();
+				LeaveCriticalSection(&elock);
+				if (FAILED(hr))
+					on_engine_error(hr);
+			}
+			return 0;
+
+		case WM_ENGINE:
+			/* late events of a source that went over to DirectShow */
+			if (ui.backend == BK_DS)
+				return 0;
+			if (wparam == MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA || wparam == MF_MEDIA_ENGINE_EVENT_FORMATCHANGE)
+				on_metadata();
+			else if (wparam == MF_MEDIA_ENGINE_EVENT_ERROR)
+				on_engine_error((HRESULT) lparam);
+			return 0;
+
+		case WM_TIMER:
+			on_timer();
+			return 0;
+
+		case WM_ERASEBKGND:
 			return 1;
 
-		case WM_PAINT: {
-				HDC dc = BeginPaint(hwnd, &ps);
-				if (show_timer && font) {
-					HGDIOBJ old = SelectObject(dc, font);
-					display_timer(hwnd, dc);
-					SelectObject(dc, old);
-				}
-				EndPaint(hwnd, &ps);
-			}
-			break;
+		case WM_PAINT:
+			ValidateRect(w, NULL);
+			EnterCriticalSection(&lock);
+			ui_changed();
+			LeaveCriticalSection(&lock);
+			return 0;
 
 		case WM_CLOSE:
-			DestroyWindow(hwnd);
-			break;
+			render_stop();
+			DestroyWindow(w);
+			return 0;
 
 		case WM_DESTROY:
-			KillTimer(hwnd, ID_TIMER);
-			DragAcceptFiles(hwnd, FALSE);
-			player_close();
-			if (font) {
-				DeleteObject(font);
-				font = NULL;
-			}
+			KillTimer(w, 1);
+			if (hook)
+				UnhookWinEvent(hook);
 			PostQuitMessage(0);
-			break;
-
-		default:
-			return DefWindowProcW(hwnd, msg, wparam, lparam);
+			return 0;
 	}
-	return 0;
+
+	return DefWindowProcW(w, msg, wparam, lparam);
 }
 
 /* ========================================================================== */
-/* entrada                                                                    */
+/* entry                                                                      */
 /* ========================================================================== */
 
-/*
-	Reads the file path from the command line.
-	No wcstombs/mbstowcs: converting to the ANSI code page and back
-	truncates any name with a character outside it - and Unicode MCI
-	(mciSendStringW) opens those paths without any problem.
-*/
-bool get_args (void) {
+static const wchar_t *HELP =
+	L"\n vplay - small always-on-top video player (Media Foundation)\n\n"
+	L" usage: vplay [file]      a running vplay plays the file instead\n\n"
+	L"   drop a file           plays it\n"
+	L"   drag                  moves the window\n"
+	L"   drag an edge          resizes (keeps the aspect)\n"
+	L"   mouse over            shows the time bar (click/drag to seek)\n"
+	L"   double click          fullscreen\n"
+	L"   space / up / down     play-pause / play / pause\n"
+	L"   left / right          -10s / +10s\n"
+	L"   F12                   restart\n"
+	L"   wheel                 zoom     (Shift: opacity, Ctrl: volume)\n"
+	L"   + / - / 0             zoom / initial size\n"
+	L"   PgUp / PgDn           opacity\n"
+	L"   M                     mute\n"
+	L"   Alt+Enter / F / Esc   fullscreen / leave fullscreen\n"
+	L"   Home / End            hide / show (global)\n"
+	L"   Q                     quit\n\n";
 
+int WINAPI wWinMain (HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show) {
+
+	(void) prev;
+	(void) cmdline;
+	(void) show;
+
+	wchar_t path[PATHLEN] = { 0 };
 	int argc = 0;
 	LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
-	if (argv == NULL) {
-		console_print(L"\n vplay: CommandLineToArgvW falhou\n");
-		return false;
-	}
-
-	if (argc >= 2) {
+	if (argv && argc >= 2) {
 		if (!wcscmp(argv[1], L"-h") || !wcscmp(argv[1], L"--help")) {
-			console_print(
-				L"\n vplay - video overlay via MCI\n\n"
-				L" usage: vplay [file]\n\n"
-				L"   drag and drop       opens another file\n"
-				L"   drag                moves the window\n"
-				L"   click on the base   toggles the time bar\n"
-				L"   left/right arrows   -10s / +10s\n"
-				L"   up/down arrows      play / pause\n"
-				L"   space               play / pause\n"
-				L"   F12                 restarts\n"
-				L"   wheel               zoom     (Shift: opacity, Ctrl: volume)\n"
-				L"   + / - / 0           zoom / original size\n"
-				L"   PgUp / PgDn         opacity\n"
-				L"   M                   mute\n"
-				L"   Alt+Enter / Esc     fullscreen\n"
-				L"   Home / End          hide / show (global)\n"
-				L"   Q                   quit\n\n"
-			);
+			console_print(HELP);
 			LocalFree(argv);
-			return false;
+			return 0;
 		}
-
-		wcsncpy(file_name, argv[1], PATHLEN - 1);
-		file_name[PATHLEN - 1] = L'\0';
+		/* full path: a running instance has another current directory */
+		if (!GetFullPathNameW(argv[1], PATHLEN, path, NULL))
+			wcsncpy(path, argv[1], PATHLEN - 1);
 	}
+	if (argv)
+		LocalFree(argv);
 
-	LocalFree(argv);
-	return true;
-}
-
-/* 1:1 pixels on scaled displays, otherwise Windows enlarges and blurs the video */
-void set_dpi_aware (void) {
-
-	HMODULE u32 = GetModuleHandleW(L"user32.dll");
-	if (u32) {
-		BOOL (WINAPI *set_ctx)(HANDLE) =
-			(BOOL (WINAPI *)(HANDLE)) (void *) GetProcAddress(u32, "SetProcessDpiAwarenessContext");
-		if (set_ctx && set_ctx((HANDLE) -4)) /* PER_MONITOR_AWARE_V2 */
-			return;
-	}
-	SetProcessDPIAware();
-}
-
-int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-
-	(void) hPrevInstance;
-	(void) lpCmdLine;
-	(void) nCmdShow;
-
-	if (!get_args())
+	/* one player: hand the file to the running one */
+	HWND other = FindWindowW(APP_CLASS, NULL);
+	if (other) {
+		COPYDATASTRUCT cd = { CD_SHOW, 0, NULL };
+		if (path[0])
+			cd = (COPYDATASTRUCT) { CD_OPEN, (DWORD) ((wcslen(path) + 1) * sizeof(wchar_t)), path };
+		SendMessageW(other, WM_COPYDATA, 0, (LPARAM) &cd);
 		return 0;
+	}
 
-	set_dpi_aware();
+	if (path[0] && GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+		wchar_t msg[PATHLEN + 64];
+		swprintf(msg, PATHLEN + 64, L"vplay: %ls: No such file or directory\n", path);
+		console_print(msg);
+		return 1;
+	}
 
-	const wchar_t *appname = L"Vplayer Light";
-	WNDCLASSW wc;
-	HWND hwnd;
-	MSG msg = {0};
+	/* 1:1 pixels on scaled displays */
+	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-	back_brush = CreateSolidBrush(BLACK);
+	CoInitializeEx(NULL, COINIT_MULTITHREADED);
+	if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_FULL))) {
+		MessageBoxW(NULL, L"Media Foundation is not available.", L"vplay", MB_ICONERROR);
+		return 1;
+	}
 
-	wc.cbClsExtra    = 0;
-	wc.cbWndExtra    = 0;
-	wc.hbrBackground = back_brush;
+	InitializeCriticalSection(&lock);
+	InitializeCriticalSection(&elock);
+	wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+	ui.scale   = GetDpiForSystem() / 96.0f;
+	ui.hover_x = -1;
+	ui.visible = true;
+	wcscpy(ui.idle, L"drop a video here");
+
+	WNDCLASSW wc = { 0 };
+	wc.style         = CS_DBLCLKS;
+	wc.lpfnWndProc   = WndProc;
+	wc.hInstance     = inst;
 	wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
 	wc.hIcon         = LoadIconW(NULL, IDI_APPLICATION);
-	wc.hInstance     = hInstance;
-	wc.lpfnWndProc   = WndProc;
-	wc.lpszClassName = appname;
-	wc.lpszMenuName  = NULL;
-	wc.style         = CS_HREDRAW | CS_VREDRAW;
+	wc.lpszClassName = APP_CLASS;
+	RegisterClassW(&wc);
 
-	if (!RegisterClassW(&wc)) {
-		MessageBoxW(NULL, L"Window Registration Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
-		return 0;
+	/* bottom right corner of the primary work area */
+	RECT wa;
+	SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+	int w = px(ui.scale, 320), h = px(ui.scale, 180), m = px(ui.scale, 16);
+
+	/* WS_EX_TOOLWINDOW: no taskbar button and out of Alt+Tab */
+	hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, APP_CLASS, L"vplay", WS_POPUP,
+	                       wa.right - w - m, wa.bottom - h - m, w, h, NULL, NULL, inst, NULL);
+	if (!hwnd)
+		return 1;
+
+	ui.scale = GetDpiForWindow(hwnd) / 96.0f;
+
+	if (!d3d_init(w, h) || !engine_init()) {
+		MessageBoxW(NULL, L"Could not start Direct3D 11 / the media engine.", L"vplay", MB_ICONERROR);
+		return 1;
 	}
 
-	/* WS_EX_TOOLWINDOW at creation time: no taskbar icon and no
-	   hide/re-show flicker after the window is created */
-	hwnd = CreateWindowExW(
-		WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST,
-		appname, appname, WS_POPUP,
-		win_x, win_y, win_w, win_h,
-		NULL, NULL, hInstance, NULL
-	);
+	DragAcceptFiles(hwnd, TRUE);
+	SetTimer(hwnd, 1, TIMER_MS, NULL);
+	hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, NULL, on_winevent,
+	                       0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-	if (hwnd == NULL) {
-		MessageBoxW(NULL, L"Window Creation Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
-		return 0;
-	}
+	render_thread = CreateThread(NULL, 0, render_main, NULL, 0, NULL);
 
-	player_layout(hwnd);
-	UpdateWindow(hwnd);
+	/* shown without taking the focus: the work in front keeps the keyboard */
+	ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
-	BOOL r;
-	while ((r = GetMessageW(&msg, NULL, 0, 0)) != 0) {
-		if (r == -1)
-			break;
+	if (path[0])
+		open_file(path);
+
+	MSG msg;
+	while (GetMessageW(&msg, NULL, 0, 0) > 0) {
 		TranslateMessage(&msg);
 		DispatchMessageW(&msg);
 	}
 
-	player_close();
-
-	if (back_brush)
-		DeleteObject(back_brush);
-
+	render_stop();
+	ds_close();
+	if (engine) {
+		IMFMediaEngine_Shutdown(engine);
+		if (engine_ex)
+			IMFMediaEngineEx_Release(engine_ex);
+		IMFMediaEngine_Release(engine);
+	}
+	if (dxgi_mgr)
+		IMFDXGIDeviceManager_Release(dxgi_mgr);
+	if (swap)
+		IDXGISwapChain_Release(swap);
+	if (device)
+		ID3D11Device_Release(device);
+	MFShutdown();
+	CoUninitialize();
 	return (int) msg.wParam;
 }

@@ -388,7 +388,7 @@ Also in `bin\`, outside the Unix-style set:
 | Program | What it does |
 |---|---|
 | `note [file]` | a small, modeless text editor for the console: menu bar (`Alt`), mouse, syntax highlighting and UTF-8; see `bin\note\README.md`. It reads `note.cfg` from its own folder |
-| `vplay [file]` | a borderless, always-on-top video overlay (MCI): drag to move, mouse wheel to zoom; `vplay --help` lists the keys |
+| `vplay [file]` | a small borderless, always-on-top video player: time bar on mouse over (click or drag to seek), drag to move, drag an edge to resize, double click for fullscreen, `Home`/`End` hide and show it from anywhere. Media Foundation first, with the installed DirectShow filters (LAV from K-Lite, for example) for what Windows has no decoder for, such as AV1. A running `vplay` takes the file of a new `vplay file`; `vplay --help` lists the keys |
 | `dump [-c columns] [-s jump] [-n range] file` | hex dump of a file |
 | `ascii` | prints the ASCII table |
 | `color` | the 256 text attributes of the console, 16 by 16 |
