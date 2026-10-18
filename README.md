@@ -244,7 +244,7 @@ The keys follow the Windows console line editor (the same as `cmd.exe`):
 **Autosuggestion**, as in fish: while you type, a history command that starts with the
 text of the line (case-insensitive) shows in gray after the cursor. Enter runs only what
 was typed. Commands are ranked by *frecency*, as in [zoxide](https://github.com/ajeetdsouza/zoxide):
-`data\history_rank.ant` keeps 50 commands, one per line with its points and the time of
+`data\history_rank.ant` keeps 100 commands, one per line with its points and the time of
 its last use (`12.50 1760000000 git status`). Each run adds a point; the suggestion weighs
 the points by how long ago the command was used (×4 within the hour, ×2 within the day,
 ×0.5 within the week, ×0.25 after that). When the points add up to more than 1000, all of

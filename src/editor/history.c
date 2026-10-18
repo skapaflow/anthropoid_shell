@@ -197,7 +197,7 @@ static void log_append (const wchar_t *cmd) {
 /* ---------- rank file ---------- */
 
 /*
- * data\history_rank.ant: the ANT_HISTORY_MAX most used commands, one per line,
+ * data\history_rank.ant: the RANK_MAX most used commands, one per line,
  * "points last-use command" (12.50 1760000000 git status), most points first;
  * the frecency of zoxide (src/db): running a command adds a point and stamps
  * the time. The autosuggestion weighs the points by how long ago the command
@@ -208,6 +208,7 @@ static void log_append (const wchar_t *cmd) {
  * new command with the list full replaces the one with the lowest score. The
  * file is read again before every change, so two shells add up their points.
  */
+#define RANK_MAX 100
 #define RANK_MAXAGE 1000.0
 
 typedef struct {
@@ -216,7 +217,7 @@ typedef struct {
 	time_t last;
 } ANT_RANK;
 
-static ANT_RANK rank[ANT_HISTORY_MAX];
+static ANT_RANK rank[RANK_MAX];
 static int rank_count = 0;
 
 /* history.ant -> history_rank.ant (the same for the ANT_HISTORY_FILE of the tests) */
@@ -269,7 +270,7 @@ static void rank_load (void) {
 	rank_clear();
 	if (!rank_path(path, MAX_PATH) || !(text = log_read_path(path)))
 		return;
-	for (line = text; *line && rank_count < ANT_HISTORY_MAX; line = next) {
+	for (line = text; *line && rank_count < RANK_MAX; line = next) {
 		double points;
 		long long last;
 
@@ -367,7 +368,7 @@ static void rank_add (const wchar_t *cmd) {
 			if (*p == L'\r' || *p == L'\n')
 				*p = L' ';
 		/* full: the lowest score goes away (a tie: the one used longest ago, then the lower line) */
-		if (rank_count == ANT_HISTORY_MAX) {
+		if (rank_count == RANK_MAX) {
 			int out = rank_count - 1;
 			for (int k = rank_count - 2; k >= 0; k--)
 				if (rank_score(k, now) < rank_score(out, now)

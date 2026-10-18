@@ -667,7 +667,7 @@ static void run_suggestion_cases (void) {
 		"unexpected rank file");
 
 	/* full: the commands with fewest points, used longest ago, go away */
-	for (int i = 0; i < 50; i++) {
+	for (int i = 0; i < 100; i++) {
 		wchar_t cmd[32];
 		swprintf(cmd, 32, L"rank_%d", i);
 		run(cmd);
@@ -677,10 +677,10 @@ static void run_suggestion_cases (void) {
 		int lines = 0;
 		for (wchar_t *p = s; *p; p++)
 			lines += *p == L'\n';
-		check_true("history_rank.ant keeps 50 commands", lines == 50, "not 50 lines");
+		check_true("history_rank.ant keeps 100 commands", lines == 100, "not 100 lines");
 	}
 	check_true("full rank drops the lowest score, oldest first",
-		rank_has(s, -1, L"3.00", L"cmd_a 1") && rank_has(s, -1, L"2.00", L"cmd_c 3") && rank_has(s, -1, L"1.00", L"rank_49")
+		rank_has(s, -1, L"3.00", L"cmd_a 1") && rank_has(s, -1, L"2.00", L"cmd_c 3") && rank_has(s, -1, L"1.00", L"rank_99")
 		&& rank_has(s, -1, L"1.00", L"rank_2") && !wcsstr(s, L"cmd_b 2") && !wcsstr(s, L" rank_1\n") && !wcsstr(s, L" rank_0\n"),
 		"wrong commands dropped");
 
