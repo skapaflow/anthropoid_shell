@@ -1792,6 +1792,8 @@ static void run_dirs_cases (const wchar_t *base) {
 	run(L"cd ..\\..\\..");
 
 	run(L"zzz_no_such\\");
+	run(L"zzz_no_such.");
+	check_row("name. with no such folder is a missing command", 1, L"command not found");
 	run(L"/");
 	swprintf(text, MAX_PATH * 2 + 32, L"\"%ls\"", base);
 	check_row("a name that is nowhere does not change the folder", 1, text);

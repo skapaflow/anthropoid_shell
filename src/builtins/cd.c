@@ -22,6 +22,10 @@
  * Implicit cd (fish): a folder path alone on the line       *
  * enters it: .., src\, .\build, ~, D:                       *
  *                                                           *
+ * name. (the old link's name.): opens the folder in         *
+ * Explorer and closes the shell; name is a folder here or   *
+ * a visited one (dirs.c), as in the implicit cd.            *
+ *                                                           *
  * Only "cd <folder>", "cd..", "cd\" and the implicit cd     *
  * enter the list of folders (each once, the current last),  *
  * which left-cd shows (line_editor.c).                      *
@@ -214,6 +218,68 @@ bool ant_cd_implicit (const wchar_t *word) {
 	if (!implicit_target(word, path, CD_PATH_MAX))
 		return false;
 	change_dir(path);
+	return true;
+}
+
+/*
+ * name.: the folder 'name' (word without the final dot) as the implicit cd would find it, plus a
+ * bare name, from here or among the visited ones. ".", ".." and "..." are not names.
+ */
+static bool open_target (const wchar_t *word, wchar_t *out, int max) {
+
+	wchar_t spec[CD_PATH_MAX];
+	int n = wcslen(word);
+
+	if (n < 2 || n >= CD_PATH_MAX || word[n - 1] != L'.' || word[n - 2] == L'.')
+		return false;
+	wmemcpy(spec, word, n - 1);
+	spec[n - 1] = 0;
+	if (implicit_target(spec, out, max))
+		return true;
+	if (is_dir_here(spec) && n - 1 < max) {
+		wcscpy(out, spec);
+		return true;
+	}
+	return ant_dirs_best(spec, out, max, NULL);
+}
+
+/* is 'word' alone on the line a name. that opens a folder? (only checks) */
+bool ant_cd_is_open (const wchar_t *word) {
+
+	wchar_t path[CD_PATH_MAX];
+	return open_target(word, path, CD_PATH_MAX);
+}
+
+/*
+ * name.: opens the folder in Explorer and closes the shell (the old link's name.). The shell
+ * stays where it is; the folder still earns its point in dirs. Returns false when 'word' is
+ * not one; *close says whether the shell must close (the folder opened).
+ */
+bool ant_cd_open (const wchar_t *word, bool *close) {
+
+	wchar_t path[CD_PATH_MAX], full[CD_PATH_MAX];
+	SHELLEXECUTEINFOW sei;
+
+	*close = false;
+	if (!open_target(word, path, CD_PATH_MAX))
+		return false;
+	if (!GetFullPathNameW(path, CD_PATH_MAX, full, NULL))
+		wcscpy(full, path);
+
+	memset(&sei, 0, sizeof sei);
+	sei.cbSize = sizeof sei;
+	sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+	sei.lpVerb = L"open";
+	sei.lpFile = full;
+	sei.nShow = SW_SHOWNORMAL;
+	if (!ShellExecuteExW(&sei)) {
+		ant_error(L"ant: %ls: cannot open (error %lu)", full, GetLastError());
+		ant_status = 1;
+		return true;
+	}
+	ant_dirs_add(full);
+	ant_status = 0;
+	*close = true;
 	return true;
 }
 

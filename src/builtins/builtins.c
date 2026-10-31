@@ -395,7 +395,7 @@ bool ant_is_builtin (const ANT_CMD *c) {
 		return true;
 	if (ant_cd_is_command(w))
 		return true;
-	if (c->argc == 1 && ant_cd_is_implicit(w))
+	if (c->argc == 1 && (ant_cd_is_implicit(w) || ant_cd_is_open(w)))
 		return true;
 	command_text(c, text, ANTMAX);
 	return ant_calc_is_expression(text);
@@ -419,6 +419,7 @@ int ant_builtin (const ANT_CMD *c) {
 
 	static char word[ANTMAX * 3];
 	int result = ANT_BUILTIN_DONE;
+	bool close_shell;
 
 	ant_arg_free();
 	for (int i = 0; i < c->argc; i++)
@@ -489,7 +490,10 @@ int ant_builtin (const ANT_CMD *c) {
 		ant_cd_print();
 	else if (c->argc == 1 && ant_cd_implicit(c->argv[0]))
 		; /* implicit cd, as in fish: "..", "src\", ".\build", "~", or "game\" from the folders already visited */
-	else if (!ant_cmd_calc(char_line_buf))
+	else if (c->argc == 1 && ant_cd_open(c->argv[0], &close_shell)) {
+		if (close_shell)
+			result = ANT_BUILTIN_EXIT; /* name.: the folder opened in Explorer, so the shell closes */
+	} else if (!ant_cmd_calc(char_line_buf))
 		; /* calculator expression */
 	else
 		result = ANT_BUILTIN_NONE;

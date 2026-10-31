@@ -8,7 +8,7 @@ TAB             Complete files (commands in the 1st word and after | ; && || &)
 CD              Change directory (CD alone: home, $HOME; CD ..  CD \  CD -: back to the previous one, $OLDPWD; / shows the current one)
 .. / DIR\ / ~   Implicit cd: a folder path alone on the line enters it
 PWD             Current folder (the built-in / does the same)
-DIRS            Visited folders and their scores, data\dir_rank.ant (DIRS -R [folder] forgets one, DIRS CLEAR all); NAME\ enters one by its name
+DIRS            Visited folders and their scores, data\dir_rank.ant (DIRS -R [folder] forgets one, DIRS CLEAR all); NAME\ enters one by its name, NAME. opens it in Explorer and closes the shell
 LS              List files (LS -A hidden, -L details, -H sizes, -1 one per line)
 CAT             Show file content (CAT -N numbers lines)
 TOUCH           Create file / update its date
