@@ -188,7 +188,7 @@ static int wait_process (HANDLE process) {
 	return (int) code;
 }
 
-/* runs a program in the console and waits; also used by the link shortcuts */
+/* runs a program in the console and waits */
 bool ant_exec_program (int argc, wchar_t **argv) {
 
 	PROCESS_INFORMATION pi;

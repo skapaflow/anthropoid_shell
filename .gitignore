@@ -7,6 +7,7 @@ obj/
 *.zip
 data/history.ant
 data/history_rank.ant
+data/dir_rank.ant
 
 # brick game save
 bin/brick.dat

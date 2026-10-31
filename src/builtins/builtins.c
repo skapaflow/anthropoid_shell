@@ -8,10 +8,10 @@
 #include "calc.h"
 #include "cd.h"
 #include "clear.h"
+#include "dirs.h"
 #include "echo.h"
 #include "env.h"
 #include "help.h"
-#include "link.h"
 #include "mk.h"
 #include "bg.h"
 #include "path.h"
@@ -26,20 +26,20 @@
 /*************************************************************
  * Built-in commands: the dispatch table, plus the small     *
  * commands that do not need a module of their own (alias,   *
- * history). Commands with more logic live in cd.c, link.c,  *
- * path.c, help.c, calc.c and clear.c.                       *
+ * history, dirs). Commands with more logic live in cd.c,    *
+ * dirs.c, path.c, help.c, calc.c and clear.c.               *
  *************************************************************/
 
 /* names TAB completes in the first word, besides programs and aliases */
 const wchar_t *const ant_builtin_names[] = {
-	L"alias", L"bg", L"cd", L"echo", L"exit", L"export", L"false", L"help", L"history", L"jobs", L"mk", L"nop", L"path",
+	L"alias", L"bg", L"cd", L"dirs", L"echo", L"exit", L"export", L"false", L"help", L"history", L"jobs", L"mk", L"nop", L"path",
 	L"true", L"unset", L"ver", L"wait", L"which", NULL
 };
 
-/* commands recognized by name, in and out of ant_builtin (cd, @prog, links and the like are decided by ant_is_builtin) */
+/* commands recognized by name, in and out of ant_builtin (cd, @prog and the like are decided by ant_is_builtin) */
 static const wchar_t *const builtin_words[] = {
 	L".", L"nop", L"ver", L"log", L"history", L"alias", L"path", L"jobs", L"help", L"exit", L"/", L"\\",
-	L"echo", L"true", L"false", L"export", L"unset", L"which", L"wait", L"mk", L"bg", NULL
+	L"echo", L"true", L"false", L"export", L"unset", L"which", L"wait", L"mk", L"bg", L"dirs", NULL
 };
 
 /* is it the name of a built-in command? (for which) */
@@ -61,7 +61,7 @@ static const wchar_t *help_topic (const wchar_t *w) {
 	return ant_builtin_named(w) ? w : NULL;
 }
 
-/* the command's words in UTF-8 joined by spaces (the text calc and link receive) */
+/* the command's words in UTF-8 joined by spaces (the text calc receives) */
 static void command_text (const ANT_CMD *c, char *out, int max) {
 
 	int used = 0;
@@ -104,6 +104,65 @@ static void cmd_alias (const char *opt) {
 		ant_status = 1;
 	} else if (!shown)
 		printf(" no aliases; alias -f opens data\\config.ant ([alias] section)\n");
+}
+
+static int by_dir_score (const void *x, const void *y) {
+
+	double d = ((const double *) y)[0] - ((const double *) x)[0];
+
+	return d > 0 ? 1 : d < 0 ? -1 : 0;
+}
+
+/*
+ * 'dirs': the folders the shell remembers (data\dir_rank.ant), best score first; the first
+ * component of a path that does not exist from here (game\) is looked for in them.
+ * 'dirs -r [folder]' forgets one (the current one by default), 'dirs clear' forgets all.
+ */
+static void cmd_dirs (const ANT_CMD *c) {
+
+	static char text[ANTMAX * 3];
+	wchar_t full[MAX_PATH * 4];
+	int total, shown = 0;
+	double (*order)[2]; /* score and index of each folder */
+
+	if (c->argc == 2 && !wcscmp(c->argv[1], L"clear")) {
+		ant_dirs_clear();
+		return;
+	}
+	if (c->argc >= 2 && c->argc <= 3 && !wcscmp(c->argv[1], L"-r")) {
+		if (c->argc == 3 ? !GetFullPathNameW(c->argv[2], MAX_PATH * 4, full, NULL) : !GetCurrentDirectoryW(MAX_PATH * 4, full)) {
+			ant_status = 1;
+			return;
+		}
+		if (!ant_dirs_remove(full)) {
+			ant_error(L"ant: dirs: %ls: not in the list", full);
+			ant_status = 1;
+		}
+		return;
+	}
+	if (c->argc != 1) {
+		ant_error(L"usage: dirs [-r [folder] | clear]");
+		ant_status = 2;
+		return;
+	}
+
+	total = ant_dirs_count();
+	order = malloc(sizeof *order * (total ? total : 1));
+	if (!order)
+		return;
+	for (int i = 0; i < total; i++) {
+		ant_dirs_get(i, &order[i][0]);
+		order[i][1] = i;
+	}
+	qsort(order, total, sizeof *order, by_dir_score);
+	for (int i = 0; i < total; i++) {
+		WideCharToMultiByte(CP_UTF8, 0, ant_dirs_get((int) order[i][1], NULL), -1, text, sizeof text, NULL, NULL);
+		printf("%8.1f  %s\n", order[i][0], text);
+		shown++;
+	}
+	free(order);
+	if (!shown)
+		printf(" no folders yet; the ones you enter are remembered in data\\dir_rank.ant\n");
 }
 
 /* a plain non-negative integer (the N of 'history N') */
@@ -339,7 +398,7 @@ bool ant_is_builtin (const ANT_CMD *c) {
 	if (c->argc == 1 && ant_cd_is_implicit(w))
 		return true;
 	command_text(c, text, ANTMAX);
-	return ant_calc_is_expression(text) || ant_link_is(text);
+	return ant_calc_is_expression(text);
 }
 
 /* does the command read as a calculator expression (2 * 3, 2 3 +)? then the shell does not glob its * */
@@ -420,22 +479,20 @@ int ant_builtin (const ANT_CMD *c) {
 		ant_cmd_mk(c);
 	else if (!strcmp(s, "bg"))
 		ant_cmd_bg(c);
+	else if (!strcmp(s, "dirs"))
+		cmd_dirs(c);
 	else if (s[0] == '@')
 		ant_launch(c); /* @prog: open without waiting, as in the old project */
 	else if (ant_cmd_cd(ant_arg))
 		; /* cd, cd.. and cd\ */
 	else if (!strcmp(s, "/") || !strcmp(s, "\\"))
 		ant_cd_print();
-	else if (c->argc == 1 && !ant_link_is(char_line_buf) && ant_cd_implicit(c->argv[0]))
-		; /* implicit cd, as in fish: "..", "src\", ".\build", "~"; a [link] "name\" comes first */
+	else if (c->argc == 1 && ant_cd_implicit(c->argv[0]))
+		; /* implicit cd, as in fish: "..", "src\", ".\build", "~", or "game\" from the folders already visited */
 	else if (!ant_cmd_calc(char_line_buf))
 		; /* calculator expression */
-	else {
-		/* [link] shortcuts from config.ant come before programs, as in the old project */
-		int link = ant_cmd_link(char_line_buf);
-		result = (link == ANT_LINK_EXIT) ? ANT_BUILTIN_EXIT :
-			(link == ANT_LINK_DONE) ? ANT_BUILTIN_DONE : ANT_BUILTIN_NONE;
-	}
+	else
+		result = ANT_BUILTIN_NONE;
 
 	ant_arg_free();
 	return result;

@@ -9,6 +9,7 @@
 #include "history.h"
 #include "../console/console.h"
 #include "../shell/shell.h"
+#include "../types/rank.h"
 #include "../types/string_util.h"
 
 /*************************************************************
@@ -67,41 +68,11 @@ static bool log_path (wchar_t *out, int max) {
 	return true;
 }
 
-/* the whole file in UTF-16 (NULL: no file or empty) */
-static wchar_t *log_read_path (const wchar_t *path) {
-
-	HANDLE f;
-	DWORD size, got = 0;
-	char *bytes;
-	wchar_t *text;
-	int n;
-
-	f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-	if (f == INVALID_HANDLE_VALUE)
-		return NULL;
-	size = GetFileSize(f, NULL);
-	bytes = (size && size != INVALID_FILE_SIZE) ? malloc(size) : NULL;
-	if (!bytes || !ReadFile(f, bytes, size, &got, NULL) || !got) {
-		free(bytes);
-		CloseHandle(f);
-		return NULL;
-	}
-	CloseHandle(f);
-	n = MultiByteToWideChar(CP_UTF8, 0, bytes, got, NULL, 0);
-	text = malloc(sizeof(wchar_t) * (n + 1));
-	if (text) {
-		MultiByteToWideChar(CP_UTF8, 0, bytes, got, text, n);
-		text[n] = 0;
-	}
-	free(bytes);
-	return text;
-}
-
 static wchar_t *log_read (void) {
 
 	wchar_t path[MAX_PATH];
 
-	return log_path(path, MAX_PATH) ? log_read_path(path) : NULL;
+	return log_path(path, MAX_PATH) ? ant_file_text(path) : NULL;
 }
 
 /* cuts the next line off the text (handles \r\n) and returns where the following one starts */
@@ -199,26 +170,15 @@ static void log_append (const wchar_t *cmd) {
 /*
  * data\history_rank.ant: the RANK_MAX most used commands, one per line,
  * "points last-use command" (12.50 1760000000 git status), most points first;
- * the frecency of zoxide (src/db): running a command adds a point and stamps
- * the time. The autosuggestion weighs the points by how long ago the command
- * was used (rank_score), so what was run in the last hour comes before what
- * piled up points last month. Aging: when the points add up to more than
- * RANK_MAXAGE, all of them shrink to 90% of it and whatever falls below 1
- * goes away; it runs before the new point, so a new command always stays. A
- * new command with the list full replaces the one with the lowest score. The
- * file is read again before every change, so two shells add up their points.
+ * the frecency of zoxide, in types/rank.c: running a command adds a point and
+ * stamps the time. The autosuggestion weighs the points by how long ago the
+ * command was used (ant_rank_score), so what was run in the last hour comes
+ * before what piled up points last month.
  */
 #define RANK_MAX 100
 #define RANK_MAXAGE 1000.0
 
-typedef struct {
-	wchar_t *text;
-	double points;
-	time_t last;
-} ANT_RANK;
-
-static ANT_RANK rank[RANK_MAX];
-static int rank_count = 0;
+static ANT_RANK rank;
 
 /* history.ant -> history_rank.ant (the same for the ANT_HISTORY_FILE of the tests) */
 static bool rank_path (wchar_t *out, int max) {
@@ -236,155 +196,30 @@ static bool rank_path (wchar_t *out, int max) {
 	return true;
 }
 
-/* the points weighed by the time since the last use (zoxide's Dir::score) */
-static double rank_score (int i, time_t now) {
+static bool rank_ready (void) {
 
-	time_t age = now - rank[i].last;
-
-	if (age < 60 * 60)
-		return rank[i].points * 4;
-	if (age < 24 * 60 * 60)
-		return rank[i].points * 2;
-	if (age < 7 * 24 * 60 * 60)
-		return rank[i].points / 2;
-	return rank[i].points / 4;
-}
-
-static void rank_remove (int i) {
-
-	free(rank[i].text);
-	memmove(rank + i, rank + i + 1, sizeof(ANT_RANK) * (rank_count - i - 1));
-	rank_count--;
-}
-
-static void rank_clear (void) {
-
-	while (rank_count)
-		free(rank[--rank_count].text);
+	return rank.item || ant_rank_init(&rank, RANK_MAX, RANK_MAXAGE, false);
 }
 
 static void rank_load (void) {
 
-	wchar_t path[MAX_PATH], *text, *line, *next, *end;
-
-	rank_clear();
-	if (!rank_path(path, MAX_PATH) || !(text = log_read_path(path)))
-		return;
-	for (line = text; *line && rank_count < RANK_MAX; line = next) {
-		double points;
-		long long last;
-
-		next = log_next_line(line);
-		points = wcstod(line, &end);
-		if (end == line || *end != L' ' || points < 1)
-			continue;
-		line = end + 1;
-		/* without the time (the first format, "points command"): used now */
-		last = wcstoll(line, &end, 10);
-		if (end != line && *end == L' ' && last >= 1000000000)
-			line = end + 1;
-		else
-			last = time(NULL);
-		if (*line && (rank[rank_count].text = _wcsdup(line))) {
-			rank[rank_count].points = points;
-			rank[rank_count].last = (time_t) last;
-			rank_count++;
-		}
-	}
-	free(text);
-}
-
-static void rank_save (void) {
-
 	wchar_t path[MAX_PATH];
-	size_t size = 1;
-	wchar_t *text;
-	char *bytes;
-	HANDLE f;
-	DWORD written;
-	int n = 0, b;
 
-	if (!rank_path(path, MAX_PATH))
+	if (!rank_ready())
 		return;
-	for (int i = 0; i < rank_count; i++)
-		size += wcslen(rank[i].text) + 64;
-	if (!(text = malloc(sizeof(wchar_t) * size)))
-		return;
-	for (int i = 0; i < rank_count; i++)
-		n += swprintf(text + n, size - n, L"%.2f %lld %ls\n", rank[i].points, (long long) rank[i].last, rank[i].text);
-	b = WideCharToMultiByte(CP_UTF8, 0, text, n, NULL, 0, NULL, NULL);
-	bytes = malloc(b + 1);
-	if (bytes) {
-		b = WideCharToMultiByte(CP_UTF8, 0, text, n, bytes, b, NULL, NULL);
-		f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
-		if (f != INVALID_HANDLE_VALUE) {
-			if (b > 0)
-				WriteFile(f, bytes, b, &written, NULL);
-			CloseHandle(f);
-		}
-	}
-	free(bytes);
-	free(text);
+	if (rank_path(path, MAX_PATH))
+		ant_rank_load(&rank, path);
+	else
+		ant_rank_clear(&rank);
 }
 
-/* zoxide's Database::age: the total goes back to 90% of RANK_MAXAGE */
-static void rank_age (void) {
-
-	double total = 0, factor;
-
-	for (int i = 0; i < rank_count; i++)
-		total += rank[i].points;
-	if (total <= RANK_MAXAGE)
-		return;
-	factor = 0.9 * RANK_MAXAGE / total;
-	for (int i = rank_count - 1; i >= 0; i--) {
-		rank[i].points *= factor;
-		if (rank[i].points < 1)
-			rank_remove(i);
-	}
-}
-
-/* one more point for cmd, used now; it goes first among the commands with as many points */
+/* one more point for cmd, used now */
 static void rank_add (const wchar_t *cmd) {
 
-	ANT_RANK r = { NULL, 0, 0 };
-	time_t now = time(NULL);
-	int i, at;
+	wchar_t path[MAX_PATH];
 
-	rank_load();
-	rank_age();
-	for (i = 0; i < rank_count; i++)
-		if (!wcscmp(rank[i].text, cmd))
-			break;
-	if (i < rank_count) {
-		r = rank[i];
-		memmove(rank + i, rank + i + 1, sizeof(ANT_RANK) * (rank_count - i - 1));
-		rank_count--;
-	} else {
-		if (!(r.text = _wcsdup(cmd)))
-			return;
-		/* one command per line */
-		for (wchar_t *p = r.text; *p; p++)
-			if (*p == L'\r' || *p == L'\n')
-				*p = L' ';
-		/* full: the lowest score goes away (a tie: the one used longest ago, then the lower line) */
-		if (rank_count == RANK_MAX) {
-			int out = rank_count - 1;
-			for (int k = rank_count - 2; k >= 0; k--)
-				if (rank_score(k, now) < rank_score(out, now)
-						|| (rank_score(k, now) == rank_score(out, now) && rank[k].last < rank[out].last))
-					out = k;
-			rank_remove(out);
-		}
-	}
-	r.points++;
-	r.last = now;
-	for (at = 0; at < rank_count && rank[at].points > r.points; at++)
-		;
-	memmove(rank + at + 1, rank + at, sizeof(ANT_RANK) * (rank_count - at));
-	rank[at] = r;
-	rank_count++;
-	rank_save();
+	if (rank_ready() && rank_path(path, MAX_PATH))
+		ant_rank_add(&rank, path, cmd, 1);
 }
 
 /* autosuggestion: the command with the best score that 'accept' takes (a tie: the newest, then the upper line) */
@@ -393,11 +228,11 @@ const wchar_t *ant_history_rank_find (bool (*accept) (const wchar_t *)) {
 	time_t now = time(NULL);
 	int best = -1;
 
-	for (int i = 0; i < rank_count; i++)
-		if (accept(rank[i].text) && (best < 0 || rank_score(i, now) > rank_score(best, now)
-				|| (rank_score(i, now) == rank_score(best, now) && rank[i].last > rank[best].last)))
+	for (int i = 0; i < rank.count; i++)
+		if (accept(rank.item[i].text) && (best < 0 || ant_rank_score(&rank, i, now) > ant_rank_score(&rank, best, now)
+				|| (ant_rank_score(&rank, i, now) == ant_rank_score(&rank, best, now) && rank.item[i].last > rank.item[best].last)))
 			best = i;
-	return best < 0 ? NULL : rank[best].text;
+	return best < 0 ? NULL : rank.item[best].text;
 }
 
 /* puts the last ANT_HISTORY_MAX commands of the file in memory */
@@ -487,7 +322,7 @@ void ant_history_clear_log (void) {
 	}
 	if (rank_path(path, MAX_PATH))
 		DeleteFileW(path);
-	rank_clear();
+	ant_rank_clear(&rank);
 }
 
 void ant_history_add (const wchar_t *cmd) {

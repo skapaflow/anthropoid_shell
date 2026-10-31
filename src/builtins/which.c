@@ -16,9 +16,8 @@
  * the shell looks for it:                                   *
  *   1. alias (config.ant [alias])                           *
  *   2. built-in command                                     *
- *   3. shortcut (config.ant [link])                         *
- *   4. the [path] folders of config.ant                     *
- *   5. what CreateProcess finds: the folder of antshell.exe, the *
+ *   3. the [path] folders of config.ant                     *
+ *   4. what CreateProcess finds: the folder of antshell.exe, the *
  *      current folder, the system folders and PATH          *
  * Without -a it stops at the first; -a lists all of them    *
  * (the same file is shown once). Exit code 1 if a name is   *
@@ -139,7 +138,6 @@ void ant_cmd_which (const ANT_CMD *c) {
 
 	for (int i = first; i < c->argc; i++) {
 		const wchar_t *name = c->argv[i];
-		wchar_t dest[2048];
 		const wchar_t *alias = ant_config_alias(name);
 		bool found = false;
 
@@ -154,13 +152,6 @@ void ant_cmd_which (const ANT_CMD *c) {
 		if ((!found || all) && ant_builtin_named(name)) {
 			ant_write(name);
 			ant_write(L": shell built-in\n");
-			found = true;
-		}
-		if ((!found || all) && ant_config_link(name, dest, 2048)) {
-			ant_write(name);
-			ant_write(L": link to ");
-			ant_write(dest);
-			ant_write(L"\n");
 			found = true;
 		}
 		if ((!found || all) && find_program(name, all))

@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "cd.h"
+#include "dirs.h"
 #include "../console/console.h"
 #include "../shell/shell.h"
 
@@ -120,6 +121,7 @@ static void change_dir (const wchar_t *path) {
 	}
 	if (GetCurrentDirectoryW(CD_PATH_MAX, cwd)) {
 		log_insert(cwd);
+		ant_dirs_add(cwd);
 		SetEnvironmentVariableW(L"PWD", cwd);
 	}
 	if (had_before)
@@ -141,10 +143,23 @@ static void change_dir_back (void) {
 	change_dir(old);
 }
 
-/* used by link: enters the shortcut's folder like a "cd <folder>" */
-void ant_cd_to (const wchar_t *path) {
+/* is it a folder from here? */
+static bool is_dir_here (const wchar_t *path) {
 
-	change_dir(path);
+	DWORD attr = GetFileAttributesW(path);
+
+	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* cd <word>: the folder from here or, if there is none, the best one of the score table (game\assets) */
+static void change_dir_typed (const wchar_t *word) {
+
+	wchar_t found[CD_PATH_MAX];
+
+	if (!is_dir_here(word) && ant_dirs_best(word, found, CD_PATH_MAX, NULL))
+		change_dir(found);
+	else
+		change_dir(word);
 }
 
 /*
@@ -163,7 +178,7 @@ static bool implicit_target (const wchar_t *word, wchar_t *out, int max) {
 		word[0] == L'\\' || word[0] == L'/' ||
 		(word[0] == L'~' && (n == 1 || word[1] == L'\\' || word[1] == L'/')) ||
 		(iswalpha(word[0]) && word[1] == L':' && (n == 2 || word[2] == L'\\' || word[2] == L'/'));
-	DWORD attr;
+	wchar_t copy[CD_PATH_MAX];
 
 	if (!shaped)
 		return false;
@@ -177,8 +192,11 @@ static bool implicit_target (const wchar_t *word, wchar_t *out, int max) {
 	else
 		return false;
 
-	attr = GetFileAttributesW(out);
-	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+	if (is_dir_here(out))
+		return true;
+	/* not here: a folder the shell visited before (game\ -> proj\game) */
+	wcscpy(copy, out);
+	return ant_dirs_best(copy, out, max, NULL);
 }
 
 /* is 'word' alone on the line an implicit cd? (only checks) */
@@ -249,7 +267,7 @@ bool ant_cmd_cd (const ANT_ARG *arg) {
 		if (!wcscmp(wide, L"-"))
 			change_dir_back();
 		else
-			change_dir(wide);
+			change_dir_typed(wide);
 		return true;
 	}
 

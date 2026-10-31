@@ -10,7 +10,7 @@
 enum {
 	ANT_BUILTIN_NONE, /* not a built-in: run it as a program */
 	ANT_BUILTIN_DONE,
-	ANT_BUILTIN_EXIT  /* the shell must close (exit, "link.") */
+	ANT_BUILTIN_EXIT  /* the shell must close (exit) */
 };
 
 extern const wchar_t *const ant_builtin_names[];

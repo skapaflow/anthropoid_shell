@@ -60,7 +60,7 @@ static void config_reload (void) {
 	if (!ant_config_load())
 		return;
 	if (ant_config_created())
-		print(CLEAR|BLUE, " [!] data\\config.ant created (link -f, path -f and alias -f open it)\n");
+		print(CLEAR|BLUE, " [!] data\\config.ant created (path -f and alias -f open it)\n");
 	for (w = ant_config_warnings(); *w; ) {
 		const wchar_t *end = wcschr(w, L'\n');
 		int n = end ? (int) (end - w) : (int) wcslen(w);

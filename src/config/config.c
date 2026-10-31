@@ -14,7 +14,6 @@
  *   [path]     one folder per line (searched before PATH)   *
  *   [export]   NAME = value                                 *
  *   [alias]    name = command                               *
- *   [link]     name = target                                *
  *                                                           *
  * Values: "quotes" keep spaces at the ends; $VAR and        *
  * ${VAR} become the variable's value (except in [alias]     *
@@ -51,7 +50,7 @@ static int     nsaved;
 static wchar_t warnings[4096];
 static bool    created;
 
-static const wchar_t *section_names[CONFIG_SECTIONS] = { L"path", L"export", L"alias", L"link" };
+static const wchar_t *section_names[CONFIG_SECTIONS] = { L"path", L"export", L"alias" };
 
 static bool blank (wchar_t c) {
 
@@ -153,9 +152,8 @@ static void unquote (const wchar_t **s, int *n, bool *literal) {
 
 static bool valid_name (int section, const wchar_t *s, int n) {
 
-	/* link: one word with no path (name\ and name. are modes); alias: no operators */
-	const wchar_t *bad = (section == CONFIG_LINK) ? L" \t\\/:\"'" :
-		(section == CONFIG_ALIAS) ? L" \t|&;<>\"'" : L" \t\"'";
+	/* alias: no operators */
+	const wchar_t *bad = (section == CONFIG_ALIAS) ? L" \t|&;<>\"'" : L" \t\"'";
 
 	if (n == 0)
 		return false;
@@ -235,7 +233,7 @@ void ant_config_parse (const wchar_t *text) {
 				if ((int) wcslen(section_names[k]) == n - 2 && !_wcsnicmp(s + 1, section_names[k], n - 2))
 					section = k;
 			if (section == -2)
-				warn(line, L"unknown section %ls (use [path], [export], [alias] or [link])", s, n);
+				warn(line, L"unknown section %ls (use [path], [export] or [alias])", s, n);
 			continue;
 		}
 
@@ -353,11 +351,6 @@ const wchar_t *ant_config_alias (const wchar_t *name) {
 
 	int k = find(CONFIG_ALIAS, name, wcslen(name));
 	return k < 0 ? NULL : entries[k].value;
-}
-
-bool ant_config_link (const wchar_t *name, wchar_t *out, int max) {
-
-	return value_of(find(CONFIG_LINK, name, wcslen(name)), out, max);
 }
 
 /* [path] folders separated by ';', like PATH; returns the length */
@@ -588,15 +581,12 @@ wchar_t *ant_config_template (const wchar_t *bin_dir) {
 		L"#   [path]    folders searched for programs (before PATH)\r\n"
 		L"#   [export]  environment variables:  NAME = value\r\n"
 		L"#   [alias]   command aliases:        name = command\r\n"
-		L"#   [link]    folder/file shortcuts:  name = target\r\n"
-		L"#             (name opens it, name\\ enters the folder, name. opens it and closes the shell)\r\n"
 		L"#\r\n"
 		L"# $VAR and ${VAR} become the variable's value (except in [alias] and inside 'single quotes');\r\n"
 		L"# \"quotes\" keep spaces at the start and at the end. Comments only at the start of a line.\r\n"
 		L"\r\n[path]\r\n%ls%ls"
 		L"\r\n[export]\r\n# EDITOR = notepad\r\n"
-		L"\r\n[alias]\r\n# ll = ls -l\r\n"
-		L"\r\n[link]\r\n# docs = $USERPROFILE\\Documents\r\n",
+		L"\r\n[alias]\r\n# ll = ls -l\r\n",
 		bin_dir ? bin_dir : L"", bin_dir ? L"\r\n" : L"");
 	return text;
 }

@@ -7,12 +7,14 @@
  * checks the options and the text TAB would put on the line.     *
  *************************************************************/
 
+#include <time.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <stdbool.h>
 #include <windows.h>
 
 #include "../src/editor/complete.h"
+#include "../src/builtins/dirs.h"
 
 static int failures = 0, total = 0;
 static wchar_t root[MAX_PATH];
@@ -256,6 +258,128 @@ int main (void) {
 		}
 		RemoveDirectoryW(bin1);
 		RemoveDirectoryW(bin2);
+	}
+
+	/* ---------- folders already visited (builtins/dirs.c): game\ means proj\game ---------- */
+	{
+		static const wchar_t *tree[] = {
+			L"proj", L"proj\\game", L"proj\\game\\assets", L"proj\\game\\assets\\tree", L"proj\\game\\maps",
+			L"proj\\src", L"proj\\src\\other", L"old", L"old\\game", L"old\\game\\assets", L"lone", L"lone\\only",
+			L"lone\\only\\sub", L"here", L"here\\src", L"here\\src\\inner", NULL
+		};
+		wchar_t base[MAX_PATH], path[MAX_PATH], rank_file[MAX_PATH], text[8192], want[4096], best[ANT_DIRS_PATH];
+		char bytes[8192];
+		DWORD written;
+		HANDLE f;
+		time_t now = time(NULL);
+		int n;
+
+		GetTempPathW(MAX_PATH, base);
+		wcscat(base, L"ant_complete_dirs");
+		CreateDirectoryW(base, NULL);
+		for (int i = 0; tree[i]; i++) {
+			swprintf(path, MAX_PATH, L"%ls\\%ls", base, tree[i]);
+			CreateDirectoryW(path, NULL);
+		}
+		/* the current folder has only src: proj, old and lone are far from here */
+		swprintf(path, MAX_PATH, L"%ls\\here", base);
+		SetCurrentDirectoryW(path);
+
+		/* what the shell visited: proj\game\assets\tree a lot, old\game\assets less, lone\only\sub, proj\src\other */
+		swprintf(rank_file, MAX_PATH, L"%ls\\dir_rank.ant", base);
+		SetEnvironmentVariableW(L"ANT_DIR_RANK_FILE", rank_file);
+		swprintf(text, 8192, L"5.00 %lld %ls\\proj\\game\\assets\\tree\n2.00 %lld %ls\\old\\game\\assets\n"
+			L"3.00 %lld %ls\\lone\\only\\sub\n1.00 %lld %ls\\proj\\src\\other\n",
+			(long long) now, base, (long long) now, base, (long long) now, base, (long long) now, base);
+		n = WideCharToMultiByte(CP_UTF8, 0, text, -1, bytes, sizeof bytes, NULL, NULL);
+		f = CreateFileW(rank_file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+		WriteFile(f, bytes, n - 1, &written, NULL);
+		CloseHandle(f);
+
+		/* two game folders: TAB lists them, best score first (the parents are not stored, they are found) */
+		swprintf(want, 4096, L"%ls\\proj\\game\\|%ls\\old\\game\\", base, base);
+		check_list("game\\ with game in two places: the folders themselves, best score first", L"game\\", want);
+		check_list("the same after cd", L"cd game\\", want);
+		check_list("game\\a: both have assets", L"game\\a", want);
+		{
+			ANT_COMPLETE c;
+			wchar_t got[2048];
+			int count = ant_complete(L"cd game\\a", 9, &c);
+
+			ant_complete_text(&c, 1, ANT_APPLY_SELECT, got, 2048);
+			/* the temporary folder may need quotes (spaces, ~ of a short name) */
+			int k = 0;
+
+			for (int i = 0; got[i]; i++)
+				if (got[i] != L'"')
+					got[k++] = got[i];
+			got[k] = 0;
+			swprintf(want, 4096, L"%ls\\old\\game\\a", base);
+			report(count == 2 && c.roots && !wcscmp(got, want), "the 2nd folder as text: absolute path + the name typed", want, got);
+			ant_complete_free(&c);
+		}
+
+		/* only one of them has the name being typed: the options are inside it, written after game\ */
+		check_list("game\\m: only proj\\game has maps", L"game\\m", L"maps\\");
+		check_apply("game\\m -> game\\maps\\", L"cd game\\m", L"cd game\\maps\\");
+		check_list("game\\assets\\t: only proj has tree", L"game\\assets\\t", L"tree\\");
+		check_apply("game\\assets\\t -> game\\assets\\tree\\", L"game\\assets\\t", L"game\\assets\\tree\\");
+
+		/* a parent that was never entered: lone\ -> lone, found through lone\only\sub */
+		check_list("lone\\ (only the child was visited)", L"lone\\", L"only\\");
+		check_apply("lone\\o", L"cd lone\\o", L"cd lone\\only\\");
+		check_list("a subfolder that was never entered still completes", L"lone\\only\\", L"sub\\");
+
+		/* what does not use the table */
+		check_list("a folder that exists here wins", L"src\\", L"inner\\");
+		check_list("not the first word or the argument of cd", L"ls game\\", L"");
+		check_list("a name that is nowhere", L"nowhere\\", L"");
+		check_list("a drive is not looked for", L"Z:\\game\\", L"");
+		check_list("@prog does not either", L"@game\\", L"");
+
+		/* the hint: where it goes and how many others */
+		n = ant_complete_where(L"game\\", 5, best, ANT_DIRS_PATH);
+		swprintf(want, 4096, L"%ls\\proj\\game", base);
+		report(n == 2 && !wcscmp(best, want), "hint: game\\ goes to proj\\game, +1", want, best);
+		n = ant_complete_where(L"lone\\", 5, best, ANT_DIRS_PATH);
+		swprintf(want, 4096, L"%ls\\lone", base);
+		report(n == 1 && !wcscmp(best, want), "hint: lone\\ goes to lone", want, best);
+		n = ant_complete_where(L"src\\", 4, best, ANT_DIRS_PATH);
+		report(n == 0, "hint: none when the folder exists here", L"0", n ? L"found" : L"0");
+		n = ant_complete_where(L"game", 4, best, ANT_DIRS_PATH);
+		report(n == 0, "hint: none without a separator", L"0", n ? L"found" : L"0");
+
+		/* choosing in the menu makes it win from then on, even against more points */
+		swprintf(want, 4096, L"%ls\\old\\game", base);
+		ant_dirs_choose(L"game\\", want);
+		swprintf(want, 4096, L"%ls\\old\\game\\|%ls\\proj\\game\\", base, base);
+		check_list("after choosing old\\game it comes first", L"game\\", want);
+
+		/* entering a folder gives it a point: the parents follow */
+		swprintf(path, MAX_PATH, L"%ls\\proj\\game\\maps", base);
+		for (int i = 0; i < 12; i++)
+			ant_dirs_add(path);
+		swprintf(want, 4096, L"%ls\\proj\\game\\|%ls\\old\\game\\", base, base);
+		check_list("twelve cd into proj\\game\\maps: proj\\game wins again", L"game\\", want);
+
+		/* forgetting */
+		swprintf(path, MAX_PATH, L"%ls\\lone\\only\\sub", base);
+		report(ant_dirs_remove(path), "remove: the entry was there", L"1", L"0");
+		check_list("removed: lone\\ is not found anymore", L"lone\\", L"");
+		report(!ant_dirs_remove(path), "remove: the entry is gone now", L"0", L"1");
+		ant_dirs_clear();
+		check_list("cleared: nothing", L"game\\", L"");
+
+		SetCurrentDirectoryW(root);
+		SetEnvironmentVariableW(L"ANT_DIR_RANK_FILE", NULL);
+		DeleteFileW(rank_file);
+		for (n = 0; tree[n]; n++)
+			;
+		for (int i = n - 1; i >= 0; i--) {
+			swprintf(path, MAX_PATH, L"%ls\\%ls", base, tree[i]);
+			RemoveDirectoryW(path);
+		}
+		RemoveDirectoryW(base);
 	}
 
 	remove_tree();

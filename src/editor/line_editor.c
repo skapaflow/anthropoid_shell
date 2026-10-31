@@ -9,6 +9,7 @@
 #include "line_editor.h"
 #include "history.h"
 #include "../builtins/cd.h"
+#include "../builtins/dirs.h"
 #include "../console/console.h"
 #include "../types/string_util.h"
 #include "../types/unicode.h"
@@ -238,6 +239,29 @@ static const wchar_t *suggestion (void) {
 		if (suggests(ant_history_get(i)))
 			return ant_history_get(i);
 	return NULL;
+}
+
+/*
+ * Hint for a folder typed from the visited ones (builtins/dirs.c): "game\  → C:\proj\game (+2)"
+ * in gray after the line, where the folder would go and how many others could be; TAB lists
+ * them. Unlike the suggestion, → does not take it into the line. The text starts with the line
+ * so redisplay draws it from the cursor on, like the suggestion; NULL when there is none.
+ */
+static const wchar_t *where_hint (void) {
+
+	static wchar_t hint[ANTMAX + ANT_DIRS_PATH + 32];
+	wchar_t path[ANT_DIRS_PATH];
+	int n;
+
+	if (!suggest_on || popup != POPUP_NONE || cursor < len || (int) wcsspn(line, L" ") == len)
+		return NULL;
+	if (!(n = ant_complete_where(line, len, path, ANT_DIRS_PATH)))
+		return NULL;
+	if (n > 1)
+		swprintf(hint, sizeof hint / sizeof *hint, L"%ls  \x2192 %ls (+%d)", line, path, n - 1);
+	else
+		swprintf(hint, sizeof hint / sizeof *hint, L"%ls  \x2192 %ls", line, path);
+	return hint;
 }
 
 /* puts the suggestion (or only its next word) into the line; false if there was no suggestion */
@@ -547,6 +571,8 @@ static void ant_redisplay (void) {
 	/* autosuggestion in gray up to the second-to-last column (does not wrap the line, as in fish);
 	   what does not fit becomes an ellipsis */
 	const wchar_t *sug = suggestion();
+	if (!sug)
+		sug = where_hint();
 	if (sug && col < width - 1) {
 		int sn = wcslen(sug), room = width - 1 - col, total = 0, used = 0, fit = len, w;
 
@@ -758,6 +784,9 @@ static void pager_close (void) {
 
 	if (popup != POPUP_PAGER)
 		return;
+	/* the folder chosen among several for the typed one (game\) is the one that wins from now on */
+	if (pager.roots && pager_selected >= 0)
+		ant_dirs_choose(pager.dir, pager.items[pager_selected].name);
 	ant_complete_free(&pager);
 	free(pager_widths);
 	pager_widths = NULL;

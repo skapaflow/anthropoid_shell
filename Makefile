@@ -13,7 +13,7 @@
 # Source layout (one directory per subject, like the Windows Terminal repository):
 #   src/main.c    entry point
 #   src/shell     main loop, parser, execution, command line arguments
-#   src/builtins  built-in commands (cd, link, path, help, calc, clear)
+#   src/builtins  built-in commands (cd, dirs, path, help, calc, clear)
 #   src/editor    line editor, command history, TAB completion
 #   src/config    data\config.ant
 #   src/console   console output: colors, cursor, errors, logo
@@ -144,8 +144,10 @@ dist: all bin
 	@if exist $(ZIP) del $(ZIP)
 	$(SYSROOT)\System32\tar.exe -a -c -f $(ZIP) -C dist antshell
 
-$(CTEST): tests/complete_test.c $(SRC_DIR)/editor/complete.c $(SRC_DIR)/editor/complete.h
-	$(CC) $(CFLAGS) tests/complete_test.c $(SRC_DIR)/editor/complete.c -o $@
+# the completion asks the visited folders (dirs.c, which keeps them with rank.c) where a typed game\ goes
+CDEPS = $(SRC_DIR)/builtins/dirs.c $(SRC_DIR)/types/rank.c $(SRC_DIR)/types/string_util.c
+$(CTEST): tests/complete_test.c $(SRC_DIR)/editor/complete.c $(SRC_DIR)/editor/complete.h $(CDEPS)
+	$(CC) $(CFLAGS) tests/complete_test.c $(SRC_DIR)/editor/complete.c $(CDEPS) -o $@
 
 $(GTEST): tests/grapheme_test.c tests/grapheme_break_data.inc $(SRC_DIR)/types/unicode.c $(SRC_DIR)/types/unicode.h
 	$(CC) $(CFLAGS) -Wno-missing-braces tests/grapheme_test.c $(SRC_DIR)/types/unicode.c -o $@

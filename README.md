@@ -65,9 +65,10 @@ AntShell works like `sh` or `bash` for everyday use. A few things worth trying r
 - type `2+3`, `sqrt(16)` or `2*pi`: a line that is only an expression is a calculation;
 - press TAB after `cd src\` and keep pressing it: a menu with the options opens, like in fish;
 - press ← on an empty line for a menu of the folders you visited in this session;
+- go into a folder, and from then on `its-name\` takes you back to it from anywhere (TAB completes inside it);
 - run `ping -n 30 server > ping.txt &` and use `jobs`, `wait` and `kill %1`.
 
-`link -f`, `path -f` and `alias -f` open the configuration file in `$EDITOR`, in `note` or in
+`path -f` and `alias -f` open the configuration file in `$EDITOR`, in `note` or in
 the Windows text editor, whichever is found first.
 
 ---
@@ -153,10 +154,8 @@ The line follows the `sh`/`bash` model:
 | `cd -` | goes back to the previous folder (`$OLDPWD`); every `cd` keeps `PWD` and `OLDPWD` in the environment |
 | `..`, `src\`, `.\build`, `~`, `D:` | **implicit cd** (as in fish): a folder path alone on the line enters it |
 | `/` | shows the current folder |
-| `link` | lists the folder shortcuts (`link -f` opens `config.ant`) |
-| `name` | opens the shortcut: a program runs in the console; a folder or file opens in the default program |
-| `name\` | enters the shortcut's folder |
-| `name.` | opens the shortcut and closes the shell |
+| `game\`, `cd game\assets` | enters a folder you already visited, found by its name (see **Visited folders** below) |
+| `dirs` | lists the visited folders with their scores; `dirs -r [folder]` forgets one (the current by default), `dirs clear` forgets all |
 | `@prog args` | opens through Windows, in its own window, without waiting; a bare `@` opens the current folder |
 | `bg [-o] [-d] program [args...]` | runs the program in the background, in its own hidden console: the terminal stays free and closing it does not end the program. Whatever it writes (a progress bar, for example) stays in that console, to be seen later with `show pid`. It becomes a job (`jobs`, `wait %n`, `kill %n`) and prints `[n] pid`. `-o` sends stdout and stderr to `<program>_<pid>.txt` in the current folder (one file per run: `bg -o ping -n 30 server` writes `ping_11804.txt`; the input becomes `NUL`). With `-o` nothing is written to the console, so `show` opens an empty window: use `bg` without `-o` to see the prints (progress bars) with `show`, and `-o` only when you want the record in a file. `-d` disables the close button of the hidden console, so the shown window cannot end the program by accident. Programs only: built-ins, aliases and `[link]` run inside the shell itself and give an error |
 | `show [-h] pid ...` | shows the hidden console of a program started with `bg` (`jobs` lists the pids); `-h` hides it again |
@@ -167,7 +166,7 @@ The line follows the `sh`/`bash` model:
 | `export NAME=value` | sets an environment variable for the following programs (lasts until the shell closes; to keep it, use `[export]` in `config.ant`); a bare `export` lists them |
 | `NAME=value` | the same as `export` (there are no shell-only variables) |
 | `unset NAME` | removes the variable |
-| `which [-a] name` | what the name runs, in the shell's order: alias, built-in, `[link]` shortcut, `[path]`, and the rest of PATH; `-a` shows all of them |
+| `which [-a] name` | what the name runs, in the shell's order: alias, built-in, `[path]`, and the rest of PATH; `-a` shows all of them |
 | `mk [-f] file...` | creates files from the templates in `data\mk.ant`: `mk main.c` already brings the hello world, `mk main` (no template) creates an empty file; the exact name wins (`Makefile`, `LICENSE`, `.gitignore`) and then the extension; creates the folders of the path (`mk src\a\x.h`); does not overwrite (`-f` overwrites); `mk -l` lists the templates. In `mk.ant`, `[.c .h]` or `[=Makefile]` starts a template and `{name}`, `{NAME}` and `{year}` are replaced |
 | `true` / `false` | only set the exit code (0 / 1) |
 | `history` | log of every command (`2026-09-30 14:05:33 folder> command`, in `data\history.ant`; the lines are numbered when shown; `history N` the last N lines, `history all` everything, `history clear` erases it and `data\history_rank.ant`) |
@@ -188,8 +187,8 @@ tell it apart from commands:
   calculation, `sqrt 9` is a command; a name that is neither a function nor a constant
   (`foo(2)`) is also a command.
 - **Constants** (`pi`, `e`): only count inside an expression, with a digit or an operator on
-  the line (`2*pi`, `e^2`, `pi 2 *`). A bare `pi` and `e` are still commands (or `[link]`
-  shortcuts); to see the value, `pi+0`.
+  the line (`2*pi`, `e^2`, `pi 2 *`). A bare `pi` and `e` are still commands; to see the
+  value, `pi+0`.
 - **Precedence**, from lowest to highest: `=`, `+ -`, `* / %`, sign `- +`, `^` (right to
   left: `2^3^2` is 512 and `-2^2` is -4).
 - **RPN** (`2 3 +`): applies when the infix reading fails and there are spaces; accepts
@@ -201,9 +200,29 @@ tell it apart from commands:
 The **implicit cd** only applies to a word that looks like a path, alone on the line:
 `..`, something ending in `\` or `/`, starting with `.\`, `..\`, `\` or `~`, or a
 drive (`D:`, `D:\games`). That way `make` is still a command even if a folder called
-`make` exists, and `make\` enters it. A `name\` shortcut from `[link]` takes priority over
-a folder of the same name in the current folder. Like `cd`, the implicit cd adds to the
-session's folder list used by left-cd.
+`make` exists, and `make\` enters it. A folder of the current folder always wins over a
+visited one of the same name. Like `cd`, the implicit cd adds to the session's folder list
+used by left-cd.
+
+**Visited folders**, a small [zoxide](https://github.com/ajeetdsouza/zoxide) of the shell
+(it replaced the old `[link]` shortcuts). Every folder you enter gets a point in
+`data\dir_rank.ant` (same format and frecency as the command rank below, up to 200 folders,
+folders that no longer exist are dropped). A path whose first part is not in the current
+folder, such as `game\` or `game\assets`, means the folders of that table that have a part
+named `game` in their path:
+
+- after one visit to `proj\game\assets`, `game\` already enters `proj\game`: the parents are
+  not stored, they are found when asked, and each one is worth the sum of everything below it;
+- the rest of the typed path has to exist under it (`game\assets` ignores a `game` without
+  `assets`), and with `cd` the same works (`cd game\assets`);
+- TAB completes inside it by the file system, visited or not (`game\as<TAB>` → `game\assets\`);
+- a gray `→ C:\proj\game (+1)` after the line shows where `game\` would go, and how many other
+  folders fit (it hides when a history suggestion takes the place). `→` does not accept it;
+- with several folders (`(+1)`), TAB lists them, best score first, and takes the first. Choosing
+  another one (TAB again, then Enter) makes it win from then on, so the next `game\` is enough.
+
+It only applies to a word alone on the line and to the argument of `cd`, not to other commands
+(`ls game\` does not know it). `dirs` shows the table.
 
 Any other word is run as a program. The search follows this order: the `[path]` folders
 of `data\config.ant` and then the normal Windows search (the folder of `antshell.exe`,
@@ -282,7 +301,7 @@ with the same widths as Windows Terminal (Unicode 16).
 ## Configuration (`data\config.ant`)
 
 A single file, in sections, next to `antshell.exe`. The shell reads the file again whenever
-it changes (it takes effect at the next prompt), and `link -f`, `path -f` and `alias -f`
+it changes (it takes effect at the next prompt), and `path -f` and `alias -f`
 open it, in this order: in the program named by the `EDITOR` variable (an `.exe`, optionally
 with arguments, e.g. `EDITOR = subl -w`), in `note` (`bin\note.exe`, which runs in the
 console itself while the shell waits for it to close) and, last, in the Windows `.txt`
@@ -306,14 +325,9 @@ MY_BIN = $USERPROFILE\bin
 # the 1st word of a command becomes the alias text, as in sh
 ll = ls -l
 up = cd.. && ll
-
-[link]
-# name opens, name\ enters the folder, name. opens and closes the shell
-doc = C:\Users\user\Documents
-vid = D:\Videos
 ```
 
-- `$VAR` and `${VAR}` become the value of the variable (in `[path]`, `[export]` and `[link]`);
+- `$VAR` and `${VAR}` become the value of the variable (in `[path]` and `[export]`);
   inside `'single quotes'` the value stays literal. `[alias]` stays as it is.
 - `"quotes"` keep spaces at the start and end of the value.
 - When the file is read again, only the `[export]` lines that changed are applied again: an
@@ -413,7 +427,7 @@ sits next to its `.c`. Code, comments and messages are in English.
 |---|---|
 | `src\main.c` | entry point |
 | `src\shell\` | main loop, line parser, expansions (`$VAR`, `~`, glob), execution (pipes, redirections, jobs), arguments of `antshell.exe` |
-| `src\builtins\` | built-in commands (`cd`, `link`, `path`, `help`, `echo`, `export`, `which`, `mk`, `bg`, calculator, `.`) and their dispatch, with `alias` and `history` |
+| `src\builtins\` | built-in commands (`cd`, `dirs`, `path`, `help`, `echo`, `export`, `which`, `mk`, `bg`, calculator, `.`) and their dispatch, with `alias` and `history` |
 | `src\editor\` | line editor, command history and TAB completion |
 | `src\config\` | reading of `data\config.ant` |
 | `src\console\` | console output: colors, cursor, errors, logo |
@@ -458,7 +472,7 @@ sits next to its `.c`. Code, comments and messages are in English.
 - The `release` workflow (`.github\workflows\release.yml`) builds with `WERROR=1` (warnings are
   errors; try `make WERROR=1` locally) and runs `make test` on every push and pull request. Pushing
   a tag such as `v1.0` also packs the package with `make dist` and attaches it to a draft release.
-- `data\config.ant`, `data\history.ant`, `data\history_rank.ant` and `bin\brick.dat` are personal and ignored by
+- `data\config.ant`, `data\history.ant`, `data\history_rank.ant`, `data\dir_rank.ant` and `bin\brick.dat` are personal and ignored by
   git: do not add them.
 
 ---

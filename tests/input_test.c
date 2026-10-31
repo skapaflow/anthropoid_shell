@@ -1763,43 +1763,85 @@ static void run_command_cases (void) {
 	check("@ after && completes commands", L"ver && @antzzunico", 19);
 }
 
-/* shortcuts (the [link] section of the config.ant of the antshell.exe copy in 'base') */
-static void run_link_cases (const wchar_t *base) {
+/* the folders already visited (data\dir_rank.ant of this session): game\ means proj\game, with TAB to choose */
+static void run_dirs_cases (const wchar_t *base) {
 
-	wchar_t text[MAX_PATH + 32];
+	wchar_t text[MAX_PATH * 2 + 32];
 
-	run(L"link");
-	check_true("link lists the shortcuts", below_has(L"[target]") && below_has(L"[prog]"), "list without [target]/[prog]");
-	check_true("link shows the help", below_has(L"name.") && below_has(L"link -f"), "no help");
+	run(L"dirs");
+	check_true("dirs with nothing visited", below_has(L"no folders yet"), "no empty message");
+	run(L"which link");
+	check_true("link is no longer a built-in", !below_has(L"link: shell built-in") && !below_has(L"link to "), "which link");
+	run(L"which dirs");
+	check_true("dirs is a built-in", below_has(L"shell built-in"), "which dirs");
 
-	run(L"target\\");
-	swprintf(text, MAX_PATH + 32, L"\"%ls\\target folder ç\"", base);
-	check_row("target\\ enters the shortcut's folder (space and accent)", 1, text);
-	run(L"cd ..");
+	/* only proj\game\assets is entered: proj\game and proj are never stored, they are found */
+	run(L"cd proj\\game\\assets");
+	run(L"cd ..\\..\\..");
+	begin(); type(L"game\\"); settle();
+	check_true("the hint shows where game\\ goes", row_has(0, L"\x2192") && row_has(0, L"proj\\game"), "no hint on the line");
+	check_true("one place only: no (+n)", !row_has(0, L"(+"), "(+n) with a single folder");
+	key(VK_RETURN, 13, 0); settle();
+	swprintf(text, MAX_PATH * 2 + 32, L"\"%ls\\proj\\game\"", base);
+	check_row("game\\ enters proj\\game, a folder that was never entered", 1, text);
+	run(L"cd ..\\..");
 
-	run(L"TARGET/");
-	check_row("name is case-insensitive and works with /", 1, text);
-	run(L"cd ..");
+	run(L"cd game\\assets");
+	swprintf(text, MAX_PATH * 2 + 32, L"\"%ls\\proj\\game\\assets\"", base);
+	check_row("cd game\\assets", 1, text);
+	run(L"cd ..\\..\\..");
 
-	run(L"med\\");
-	swprintf(text, MAX_PATH + 32, L"\"%ls\\med1\"", base);
-	check_row("repeated shortcut: the first one wins", 1, text);
-	run(L"cd ..");
+	run(L"zzz_no_such\\");
+	run(L"/");
+	swprintf(text, MAX_PATH * 2 + 32, L"\"%ls\"", base);
+	check_row("a name that is nowhere does not change the folder", 1, text);
 
-	run(L"nothing");
-	check_row("a missing target gives an error", 1, L"shortcut [nothing]");
-	run(L"nothing.");
-	check_row("name. with a missing target gives an error and does not close", 1, L"shortcut [nothing]");
+	/* a second game folder: the hint counts it and TAB lists both */
+	run(L"cd old\\game\\assets");
+	run(L"cd ..\\..\\..");
+	begin(); type(L"game\\"); settle();
+	check_true("the hint shows the best one and (+1)", row_has(0, L"proj\\game") && row_has(0, L"(+1)"), "hint without (+1)");
+	key(VK_TAB, 9, 0); settle();
+	check_true("TAB lists both game folders", below_has(L"proj\\game\\") && below_has(L"old\\game\\"), "pager without both");
+	key(VK_TAB, 9, 0); settle();
+	swprintf(text, MAX_PATH * 2 + 32, L"old\\game\\");
+	check_true("the 2nd option replaces game\\ with the whole path", row_has(0, text), "line without old\\game\\");
+	key(VK_RETURN, 13, 0);   /* accepts the option and closes the menu */
+	key(VK_RETURN, 13, 0); settle();
+	swprintf(text, MAX_PATH * 2 + 32, L"\"%ls\\old\\game\"", base);
+	check_row("Enter enters the chosen folder", 1, text);
 
-	run(L"prog");
-	check_true("a shortcut to a program runs in the console", below_has(L"usage: input_test"), "the program did not run");
+	/* what was chosen wins from then on, although proj\game has more points */
+	run(L"cd ..\\..");
+	run(L"game\\");
+	check_row("next time game\\ is enough: old\\game wins", 1, text);
+	run(L"cd ..\\..");
+	begin(); type(L"game\\"); settle();
+	check_true("the hint follows: old\\game first", row_has(0, L"old\\game") && row_has(0, L"(+1)"), "hint still on proj");
+	key(VK_ESCAPE, 27, 0); key(VK_ESCAPE, 27, 0);
 
-	run(L"target extra");
-	check_true("a line with a space is not a shortcut", !row_has(1, L"target folder"), "entered the shortcut's folder");
+	/* the folders inside the one it resolves to complete by the file system, visited or not */
+	begin(); type(L"cd game\\as"); key(VK_TAB, 9, 0); settle();
+	check_true("TAB on cd game\\as: both have assets, the folders are listed", below_has(L"proj\\game\\") && below_has(L"old\\game\\"), "no menu");
+	key(VK_ESCAPE, 27, 0); key(VK_ESCAPE, 27, 0);
+
+	/* dirs: the list, forgetting one and all */
+	run(L"dirs");
+	check_true("dirs lists what was entered", below_has(L"old\\game\\assets") && below_has(L"proj\\game\\assets"), "dirs without the folders");
+	swprintf(text, MAX_PATH * 2 + 32, L"dirs -r \"%ls\\proj\\game\\assets\"", base);
+	run(text);
+	run(L"dirs");
+	check_true("dirs -r forgets one", !below_has(L"proj\\game\\assets") && below_has(L"old\\game\\assets"), "dirs -r did not remove it");
+	swprintf(text, MAX_PATH * 2 + 32, L"dirs -r \"%ls\\nowhere\"", base);
+	run(text);
+	check_true("dirs -r of a folder that is not there", below_has(L"not in the list"), "no error");
+	run(L"dirs clear");
+	run(L"dirs");
+	check_true("dirs clear forgets all", below_has(L"no folders yet"), "dirs clear did not empty it");
+	run(L"dirs bogus");
+	check_true("dirs with a bad argument", below_has(L"usage: dirs"), "no usage");
 
 	run(L"/");
-	swprintf(text, MAX_PATH + 32, L"\"%ls\"", base);
-	check_row("the shell stays in the original folder", 1, text);
 }
 
 /* folder with a space and an accent: without quotes (joins the arguments) and with quotes */
@@ -2128,51 +2170,49 @@ static int inner (const wchar_t *term, const wchar_t *report_path) {
 		RemoveDirectoryW(dir);
 	}
 
-	/* 3rd session: copy of antshell.exe with a test data\config.ant */
+	/* 3rd session: copy of antshell.exe with its own data\config.ant and its own table of visited folders */
 	{
-		static const wchar_t *dirs[] = { L"target folder ç", L"med1", L"med2", NULL };
-		wchar_t base[MAX_PATH], data[MAX_PATH], exe[MAX_PATH], quit_exe[MAX_PATH], config[MAX_PATH], self[MAX_PATH], path[MAX_PATH];
-		char u8[MAX_PATH * 3];
+		static const wchar_t *dirs[] = {
+			L"proj", L"proj\\game", L"proj\\game\\assets", L"old", L"old\\game", L"old\\game\\assets", NULL
+		};
+		wchar_t base[MAX_PATH], data[MAX_PATH], exe[MAX_PATH], config[MAX_PATH], rank_file[MAX_PATH], path[MAX_PATH];
 		FILE *f;
+		int n = 0;
 
 		GetTempPathW(MAX_PATH, base);
-		wcscat(base, L"ant_link_test");
+		wcscat(base, L"ant_dt");
 		CreateDirectoryW(base, NULL);
 		swprintf(data, MAX_PATH, L"%ls\\data", base);
 		CreateDirectoryW(data, NULL);
 		swprintf(config, MAX_PATH, L"%ls\\config.ant", data);
+		swprintf(rank_file, MAX_PATH, L"%ls\\dir_rank.ant", data);
+		DeleteFileW(rank_file);
+		SetEnvironmentVariableW(L"ANT_DIR_RANK_FILE", rank_file);
 		for (int i = 0; dirs[i]; i++) {
 			swprintf(path, MAX_PATH, L"%ls\\%ls", base, dirs[i]);
 			CreateDirectoryW(path, NULL);
 		}
 		swprintf(exe, MAX_PATH, L"%ls\\antshell.exe", base);
-		swprintf(quit_exe, MAX_PATH, L"%ls\\quit_exe.exe", base);
 		CopyFileW(term, exe, FALSE);
-		GetModuleFileNameW(NULL, self, MAX_PATH);
-		CopyFileW(self, quit_exe, FALSE);
 
-		/* a config.ant with only [link] shortcuts, in UTF-8 with CRLF like the real one */
+		/* an empty config.ant, so the shell does not write a new one and say so */
 		if ((f = _wfopen(config, L"wb"))) {
-			WideCharToMultiByte(CP_UTF8, 0, base, -1, u8, sizeof u8, NULL, NULL);
-			fputs("[link]\r\n", f);
-			fprintf(f, "target = %s\\target folder \xc3\xa7\r\n", u8);
-			fprintf(f, "med = %s\\med1\r\n", u8);
-			fprintf(f, "nothing = %s\\no_such_folder\r\n", u8);
-			fprintf(f, "prog = %s\\quit_exe.exe\r\n", u8);
-			fprintf(f, "med = %s\\med2\r\n", u8);
+			fputs("[alias]\r\n", f);
 			fclose(f);
 		}
 
 		if (start_term(exe, base, &pi)) {
-			run_link_cases(base);
+			run_dirs_cases(base);
 			stop_term(&pi);
 		}
 
+		DeleteFileW(rank_file);
 		DeleteFileW(config);
 		RemoveDirectoryW(data);
 		DeleteFileW(exe);
-		DeleteFileW(quit_exe);
-		for (int i = 0; dirs[i]; i++) {
+		while (dirs[n])
+			n++;
+		for (int i = n - 1; i >= 0; i--) {
 			swprintf(path, MAX_PATH, L"%ls\\%ls", base, dirs[i]);
 			RemoveDirectoryW(path);
 		}
@@ -2214,6 +2254,12 @@ int main (void) {
 	SetEnvironmentVariableW(L"ANT_HISTORY_FILE", history_path);
 	wcscpy(history_path + wcslen(history_path) - 4, L"_rank.ant");
 	DeleteFileW(history_path);
+
+	/* nor the data\dir_rank.ant (the last session has a table of its own) */
+	GetTempPathW(MAX_PATH, history_path);
+	wcscat(history_path, L"ant_input_test_dirs.ant");
+	DeleteFileW(history_path);
+	SetEnvironmentVariableW(L"ANT_DIR_RANK_FILE", history_path);
 
 	memset(&si, 0, sizeof si);
 	si.cb = sizeof si;

@@ -19,9 +19,8 @@
  *       current folder (one file per run: youtube_11804.txt) *
  *   -d  disables the close button of the hidden console, so  *
  *       a shown window cannot end the program by accident    *
- * It runs programs only: a built-in, an alias or a [link]    *
- * runs in the shell itself and cannot go to the background   *
- * this way.                                                  *
+ * It runs programs only: a built-in or an alias runs in the  *
+ * shell itself and cannot go to the background this way.     *
  *************************************************************/
 
 /* output file base: the program name without folder and extension */

@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "complete.h"
+#include "../builtins/dirs.h"
 
 /*************************************************************
  * File name completion for TAB.                             *
@@ -19,7 +20,10 @@
  *     ignores case ("smart case");                          *
  *   - only the options of the best category are kept;       *
  *   - a directory ends with the separator, so the next      *
- *     TAB continues inside it.                              *
+ *     TAB continues inside it;                              *
+ *   - a typed folder that does not exist from here (game\)  *
+ *     is looked for in the folders already visited          *
+ *     (builtins/dirs.c); with several, TAB lists them.      *
  *************************************************************/
 
 /* rank = (kind << 2) + case, as in fish */
@@ -211,15 +215,15 @@ static void add_match (ANT_COMPLETE *c, int *capacity, const wchar_t *name, bool
 	add_item(c, capacity, name, dir);
 }
 
-/* files and folders in c->dir */
-static void search_files (ANT_COMPLETE *c, int *capacity, bool dirs_only) {
+/* files and folders in 'base' (c->dir, or the folder it was resolved to) */
+static void search_files (ANT_COMPLETE *c, int *capacity, bool dirs_only, const wchar_t *base) {
 
 	wchar_t pattern[ANT_COMPLETE_PATH + 2];
 	WIN32_FIND_DATAW fd;
 	HANDLE find;
 	bool dot = (c->word[0] == L'.');
 
-	swprintf(pattern, ANT_COMPLETE_PATH + 2, L"%ls*", c->dir);
+	swprintf(pattern, ANT_COMPLETE_PATH + 2, L"%ls*", base);
 	find = FindFirstFileW(pattern, &fd);
 	if (find == INVALID_HANDLE_VALUE)
 		return;
@@ -315,7 +319,7 @@ static void search_commands (ANT_COMPLETE *c, int *capacity) {
 			add_match(c, capacity, command_builtins[i], false);
 
 	add_group = GROUP_FOLDER;
-	search_files(c, capacity, true);
+	search_files(c, capacity, true, c->dir);
 
 	add_group = GROUP_CURRENT;
 	search_exes(c, capacity, L"", 0);
@@ -360,26 +364,103 @@ static int finish (ANT_COMPLETE *c) {
 	return c->count;
 }
 
+/* is the word before 'beg' a cd? (cd game\ completes folders already visited, like a lone game\ does) */
+static bool after_cd (const wchar_t *line, int beg) {
+
+	int e = beg, s;
+
+	while (e > 0 && (line[e - 1] == L' ' || line[e - 1] == L'\t'))
+		e--;
+	if (e == beg)
+		return false;
+	for (s = e; s > 0 && !wcschr(L" \t|&;<>", line[s - 1]); s--)
+		;
+	return e - s == 2 && !_wcsnicmp(line + s, L"cd", 2);
+}
+
+/* is the typed folder (game\) there, from the current one? Then it is that one and the table is not asked */
+static bool dir_here (const wchar_t *dir) {
+
+	DWORD attr = GetFileAttributesW(dir);
+
+	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* does the folder have a name that the typed part matches? */
+static bool has_match (const wchar_t *path, const wchar_t *word) {
+
+	ANT_COMPLETE probe;
+	wchar_t base[ANT_COMPLETE_PATH];
+	int capacity = 0, n = wcslen(path);
+	bool found;
+
+	if (n + 2 >= ANT_COMPLETE_PATH)
+		return false;
+	wcscpy(base, path);
+	if (!is_sep(base[n - 1]))
+		wcscat(base, L"\\");
+	memset(&probe, 0, sizeof probe);
+	probe.sep = L'\\';
+	probe.rank = NO_MATCH;
+	wcscpy(probe.word, word);
+	add_group = GROUP_FILE;
+	search_files(&probe, &capacity, false, base);
+	found = probe.count > 0;
+	drop_items(&probe);
+	free(probe.items);
+	return found;
+}
+
 /*
- * Completes the word that ends at line[cursor]: fills 'c' and returns the
- * number of options. The options are sorted and 'c->prefix' holds the
- * length of the prefix common to all of them.
- *
- * In command position (start of the line or after |, ;, &&, || and &), with
- * no path and not empty, completes commands (as fish does); if none matches,
- * falls back to files. An empty word still lists the folder. An '@' in front
- * (open without waiting) stays out of the search and comes back in the
- * inserted text.
+ * The folders the typed one (c->dir, e.g. game\) can mean when it does not exist from
+ * here: first word of a command (an implicit cd) or the argument of cd, with the
+ * rest of the path and the name being typed present in each. Best score first; the
+ * array is for free(). 0 when this is not the case.
  */
-int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
+static int resolve_dir (const ANT_COMPLETE *c, bool command, const wchar_t *line, ANT_DIR_CAND **out) {
+
+	int n, k = 0;
+
+	*out = NULL;
+	if (!c->dir[0] || c->lead || !(command || after_cd(line, c->beg)) || dir_here(c->dir))
+		return 0;
+	n = ant_dirs_resolve(c->dir, out);
+	for (int i = 0; i < n; i++)
+		if (!c->word[0] || has_match((*out)[i].path, c->word))
+			(*out)[k++] = (*out)[i];
+	if (k == 0) {
+		free(*out);
+		*out = NULL;
+	}
+	return k;
+}
+
+/* the options are the folders themselves (TAB on game\ with game in several places), best first */
+static void search_roots (ANT_COMPLETE *c, int *capacity, const ANT_DIR_CAND *cand, int n) {
+
+	c->sep = L'\\';
+	for (int i = 0; i < n; i++)
+		add_item(c, capacity, cand[i].path, true);
+	c->roots = true;
+	c->rank = RANK(MATCH_SUBSTR, CASE_SAME);
+	c->prefix = 0;
+}
+
+/*
+ * Finds the word that ends at line[cursor] and fills what 'c' knows about it: where
+ * it starts, the typed path (dir), the name being typed (word) and the separator.
+ * *command tells if it is in command position (start of the line or after |, ;, &&,
+ * || and &). False when there is nothing to complete (too long, a wildcard).
+ */
+static bool locate (const wchar_t *line, int cursor, ANT_COMPLETE *c, bool *command) {
 
 	wchar_t raw[ANT_COMPLETE_PATH], quote = 0;
-	bool command = true;
-	int beg = 0, n = 0, cut = 0, capacity = 0;
+	int beg = 0, n = 0, cut = 0;
 
 	memset(c, 0, sizeof *c);
 	c->sep = L'\\';
 	c->rank = NO_MATCH;
+	*command = true;
 
 	/* start of the word: after the last space or operator outside quotes (like parser.c) */
 	for (int i = 0; i < cursor; i++) {
@@ -397,12 +478,12 @@ int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
 	/* command position: nothing before, or the last character before is | & ; (after < and > it is a file) */
 	for (int i = beg - 1; i >= 0; i--)
 		if (line[i] != L' ' && line[i] != L'\t') {
-			command = wcschr(L"|&;", line[i]) != NULL;
+			*command = wcschr(L"|&;", line[i]) != NULL;
 			break;
 		}
 
 	if (cursor - beg >= ANT_COMPLETE_PATH - 1)
-		return 0;
+		return false;
 
 	for (int i = beg; i < cursor; i++) {
 		if (line[i] == L'"' || line[i] == L'\'')
@@ -413,7 +494,7 @@ int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
 	raw[n] = 0;
 
 	/* @prog: completes what comes after the @ */
-	if (command && raw[0] == L'@') {
+	if (*command && raw[0] == L'@') {
 		c->lead = L'@';
 		memmove(raw, raw + 1, sizeof(wchar_t) * n);
 		n--;
@@ -421,7 +502,7 @@ int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
 
 	/* a typed wildcard must not become a FindFirstFile pattern */
 	if (wcspbrk(raw, L"*?"))
-		return 0;
+		return false;
 
 	/* path up to the last \, / or : (C:) and the partial name after it */
 	for (int i = 0; i < n; i++)
@@ -435,8 +516,50 @@ int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
 			c->sep = raw[i];
 			break;
 		}
+	return true;
+}
 
-	if (command && cut == 0 && c->word[0]) {
+/*
+ * Completes the word that ends at line[cursor]: fills 'c' and returns the
+ * number of options. The options are sorted and 'c->prefix' holds the
+ * length of the prefix common to all of them.
+ *
+ * In command position (start of the line or after |, ;, &&, || and &), with
+ * no path and not empty, completes commands (as fish does); if none matches,
+ * falls back to files. An empty word still lists the folder. An '@' in front
+ * (open without waiting) stays out of the search and comes back in the
+ * inserted text.
+ *
+ * A typed folder that does not exist from here (game\) is looked for among the
+ * folders already visited (resolve_dir): with one match, the completion looks
+ * inside it; with several, the options are the folders themselves (c->roots).
+ */
+int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
+
+	wchar_t base[ANT_COMPLETE_PATH];
+	const wchar_t *search = NULL;
+	ANT_DIR_CAND *cand;
+	bool command;
+	int capacity = 0, ncand;
+
+	if (!locate(line, cursor, c, &command))
+		return 0;
+
+	ncand = resolve_dir(c, command, line, &cand);
+	if (ncand >= 2) {
+		search_roots(c, &capacity, cand, ncand);
+		free(cand);
+		return c->count;
+	}
+	if (ncand == 1 && (int) wcslen(cand[0].path) + 2 < ANT_COMPLETE_PATH) {
+		wcscpy(base, cand[0].path);
+		if (!is_sep(base[wcslen(base) - 1]))
+			wcscat(base, L"\\");
+		search = base;
+	}
+	free(cand);
+
+	if (command && !c->dir[0] && c->word[0]) {
 		search_commands(c, &capacity);
 		/* folders alone do not count: with no command, the files come back */
 		if (finish(c) > 0 && has_command(c))
@@ -445,8 +568,31 @@ int ant_complete (const wchar_t *line, int cursor, ANT_COMPLETE *c) {
 		c->rank = NO_MATCH;
 	}
 
-	search_files(c, &capacity, false);
+	search_files(c, &capacity, false, search ? search : c->dir);
 	return finish(c);
+}
+
+/*
+ * Where the typed folder would go (game\ -> C:\proj\game) for the hint in the line:
+ * the best folder in 'out' and how many there are (0 if the word is not that case).
+ */
+int ant_complete_where (const wchar_t *line, int cursor, wchar_t *out, int max) {
+
+	ANT_COMPLETE c;
+	ANT_DIR_CAND *cand;
+	bool command;
+	int n = 0;
+
+	if (locate(line, cursor, &c, &command))
+		n = resolve_dir(&c, command, line, &cand);
+	if (n > 0) {
+		if ((int) wcslen(cand[0].path) < max)
+			wcscpy(out, cand[0].path);
+		else
+			n = 0;
+		free(cand);
+	}
+	return n;
 }
 
 /* the options matched at the start of the name (the typed prefix can be highlighted) */
@@ -484,24 +630,29 @@ static wchar_t quote_for (const ANT_COMPLETE *c, const wchar_t *name, int nlen) 
 int ant_complete_text (const ANT_COMPLETE *c, int item, int mode, wchar_t *out, int max) {
 
 	const wchar_t *name = c->items[item < 0 ? 0 : item].name;
+	/* the folders themselves (c->roots) replace the typed folder and keep the name being typed after them */
+	const wchar_t *dirp = c->roots ? L"" : c->dir;
 	int nlen = (item < 0) ? c->prefix : (int) wcslen(name);
-	int dlen = wcslen(c->dir);
+	int dlen = wcslen(dirp);
+	int wlen = c->roots ? wcslen(c->word) : 0;
 	bool dir = (item >= 0 && c->items[item].dir);
-	bool quote = c->quoted || needs_quotes(c->dir, dlen) || needs_quotes(name, nlen);
+	bool quote = c->quoted || needs_quotes(dirp, dlen) || needs_quotes(name, nlen) || needs_quotes(c->word, wlen);
 	wchar_t q = quote_for(c, name, nlen);
 	int k = 0;
 
-	if (dlen + nlen + 5 > max)
+	if ((c->roots && item < 0) || dlen + nlen + wlen + 5 > max)
 		return 0;
 
 	if (c->lead)
 		out[k++] = c->lead;
 	if (quote)
 		out[k++] = q;
-	wmemcpy(out + k, c->dir, dlen);
+	wmemcpy(out + k, dirp, dlen);
 	k += dlen;
 	wmemcpy(out + k, name, nlen);
 	k += nlen;
+	wmemcpy(out + k, c->word, wlen);
+	k += wlen;
 	if (quote && mode != ANT_APPLY_PREFIX)
 		out[k++] = q;
 	if (mode == ANT_APPLY_UNIQUE && !dir)

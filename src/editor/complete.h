@@ -36,6 +36,7 @@ typedef struct {
 	wchar_t word[ANT_COMPLETE_PATH]; /* typed part of the name (e.g. mo) */
 	wchar_t sep;                   /* separator in use: \ or / */
 	wchar_t lead;                  /* '@' in front of the word (open without waiting), or 0 */
+	bool roots;                    /* the options are the folders a typed one (game\) can mean, not names inside it */
 	int rank;                      /* match category (lower = better) */
 	int prefix;                    /* units of the prefix common to all names */
 	int count;
@@ -44,6 +45,7 @@ typedef struct {
 
 extern void ant_complete_set_commands (const wchar_t *const *, const wchar_t *, const wchar_t *);
 extern int ant_complete (const wchar_t *, int, ANT_COMPLETE *);
+extern int ant_complete_where (const wchar_t *, int, wchar_t *, int);
 extern bool ant_complete_is_prefix (const ANT_COMPLETE *);
 extern int ant_complete_text (const ANT_COMPLETE *, int, int, wchar_t *, int);
 extern void ant_complete_free (ANT_COMPLETE *);

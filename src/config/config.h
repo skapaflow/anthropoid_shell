@@ -9,7 +9,6 @@ enum {
 	CONFIG_PATH,   /* [path]   program folders, searched before PATH */
 	CONFIG_EXPORT, /* [export] environment variables */
 	CONFIG_ALIAS,  /* [alias]  name = command */
-	CONFIG_LINK,   /* [link]   shortcuts */
 	CONFIG_SECTIONS
 };
 
@@ -28,7 +27,6 @@ extern const wchar_t *ant_config_name (int, int);
 extern const wchar_t *ant_config_raw (int, int);
 extern bool ant_config_value (int, int, wchar_t *, int);
 extern const wchar_t *ant_config_alias (const wchar_t *);
-extern bool ant_config_link (const wchar_t *, wchar_t *, int);
 extern int ant_config_path (wchar_t *, int);
 
 #endif

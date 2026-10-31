@@ -49,12 +49,6 @@ static const wchar_t *value (int section, int i) {
 	return ant_config_value(section, i, out, 4096) ? out : NULL;
 }
 
-static const wchar_t *link_of (const wchar_t *name) {
-
-	static wchar_t out[4096];
-	return ant_config_link(name, out, 4096) ? out : NULL;
-}
-
 static const wchar_t *expand (const wchar_t *in) {
 
 	static wchar_t out[4096];
@@ -116,10 +110,7 @@ int main (void) {
 		L"ll = fs -l\r\n"
 		L"up=cd.. && ll\r\n"
 		L"q = 'quotes vanish'\r\n"
-		L"[link]\r\n"
-		L"doc  = C:\\Users\\user\\Documents\r\n"
-		L"vid = D:\\VIDEOS\r\n"
-		L"garbage = shell:RecycleBinFolder");
+		L"last = no newline at the end");
 
 	check("no warnings", L"", ant_config_warnings());
 	check_int("[path]: 3 pastas", 3, ant_config_count(CONFIG_PATH));
@@ -139,15 +130,12 @@ int main (void) {
 	check("[alias] no space around the =", L"cd.. && ll", ant_config_alias(L"up"));
 	check("[alias] 'quotes' disappear", L"quotes vanish", ant_config_alias(L"q"));
 	check("[alias] inexistente", NULL, ant_config_alias(L"missing"));
-	check("[link] with spaces", L"C:\\Users\\user\\Documents", link_of(L"DOC"));
-	check("[link] last line without \\n", L"shell:RecycleBinFolder", link_of(L"garbage"));
-	check("[link] inexistente", NULL, link_of(L"missing"));
-	check("[link] does not see aliases", NULL, link_of(L"ll"));
+	check("[alias] last line without \\n", L"no newline at the end", ant_config_alias(L"last"));
 
 	/* ---------- avisos ---------- */
 	ant_config_parse(
 		L"stray\n"
-		L"[link]\n"
+		L"[alias]\n"
 		L"a = 1\n"
 		L"a = 2\n"
 		L"no equals sign\n"
@@ -156,17 +144,21 @@ int main (void) {
 		L"[other]\n"
 		L"x = y\n"
 		L"[alias]\n"
-		L"a|b = x\n");
+		L"a|b = x\n"
+		L"[link]\n"
+		L"doc = C:\\Users\\user\\Documents\n");
 	check("warnings with the line number",
 		L"config.ant, line 1: \"stray\" outside a section\n"
 		L"config.ant, line 4: a repeated; the first one wins\n"
 		L"config.ant, line 5: missing '=' in \"no equals sign\"\n"
 		L"config.ant, line 6: invalid name \"b c\"\n"
 		L"config.ant, line 7: d has no value\n"
-		L"config.ant, line 8: unknown section [other] (use [path], [export], [alias] or [link])\n"
-		L"config.ant, line 11: invalid name \"a|b\"\n",
+		L"config.ant, line 8: unknown section [other] (use [path], [export] or [alias])\n"
+		L"config.ant, line 11: invalid name \"a|b\"\n"
+		L"config.ant, line 12: unknown section [link] (use [path], [export] or [alias])\n",
 		ant_config_warnings());
-	check("repeat: the first one wins", L"1", link_of(L"a"));
+	check("repeat: the first one wins", L"1", ant_config_alias(L"a"));
+	check("[link] was taken out: its lines are ignored", NULL, ant_config_alias(L"doc"));
 
 	/* ---------- $VAR ---------- */
 	SetEnvironmentVariableW(L"ANT_T", L"C:\\x");
@@ -181,15 +173,14 @@ int main (void) {
 	ant_config_parse(
 		L"[export]\n"
 		L"ANT_A = $ANT_T\\a\n"
-		L"[link]\n"
-		L"x = $ANT_T\\link\n"
-		L"y = '$ANT_T\\literal'\n"
+		L"ANT_B = $ANT_T\\b\n"
+		L"ANT_C = '$ANT_T\\literal'\n"
 		L"[alias]\n"
 		L"z = echo $ANT_T\n"
 		L"[path]\n"
 		L"${ANT_T}\\bin\n");
-	check("$VAR no [link]", L"C:\\x\\link", link_of(L"x"));
-	check("'single quotes' do not expand", L"$ANT_T\\literal", link_of(L"y"));
+	check("$VAR no [export]", L"C:\\x\\b", value(CONFIG_EXPORT, 1));
+	check("'single quotes' do not expand", L"$ANT_T\\literal", value(CONFIG_EXPORT, 2));
 	check("[alias] stays as it is", L"echo $ANT_T", ant_config_alias(L"z"));
 	check("${VAR} no [path]", L"C:\\x\\bin", value(CONFIG_PATH, 0));
 	check("[export] before applying: text of the file", L"$ANT_T\\a", ant_config_raw(CONFIG_EXPORT, 0));
@@ -200,19 +191,18 @@ int main (void) {
 	check("template: no warnings", L"", ant_config_warnings());
 	check_int("template: one folder", 1, ant_config_count(CONFIG_PATH));
 	check("template: the bin folder is in [path]", L"C:\\Program Files\\AntShell\\bin", value(CONFIG_PATH, 0));
-	check_int("template: no shortcuts, aliases or variables", 0, ant_config_count(CONFIG_LINK) +
-		ant_config_count(CONFIG_ALIAS) + ant_config_count(CONFIG_EXPORT));
+	check_int("template: no aliases or variables", 0, ant_config_count(CONFIG_ALIAS) + ant_config_count(CONFIG_EXPORT));
 	free(text);
 
 	text = ant_config_template(NULL);
 	ant_config_parse(text);
 	check("template without a folder: no warnings", L"", ant_config_warnings());
-	check_int("template without a folder: empty", 0, ant_config_count(CONFIG_PATH) + ant_config_count(CONFIG_LINK) +
+	check_int("template without a folder: empty", 0, ant_config_count(CONFIG_PATH) +
 		ant_config_count(CONFIG_ALIAS) + ant_config_count(CONFIG_EXPORT));
 	free(text);
 
 	ant_config_parse(NULL);
-	check_int("empty", 0, ant_config_count(CONFIG_LINK));
+	check_int("empty", 0, ant_config_count(CONFIG_ALIAS));
 
 	/* ---------- [export] when the file is read again ---------- */
 	GetTempPathW(MAX_PATH, config_path);
