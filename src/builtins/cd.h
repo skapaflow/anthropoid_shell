@@ -15,6 +15,8 @@ extern bool ant_cd_is_implicit (const wchar_t *);
 extern bool ant_cd_implicit (const wchar_t *);
 extern bool ant_cd_is_open (const wchar_t *);
 extern bool ant_cd_open (const wchar_t *, bool *);
+extern bool ant_cd_is_view (const wchar_t *);
+extern bool ant_cd_view (const wchar_t *);
 extern bool ant_cd_is_command (const wchar_t *);
 extern bool ant_cmd_cd (const ANT_ARG *);
 

@@ -155,7 +155,8 @@ The line follows the `sh`/`bash` model:
 | `..`, `src\`, `.\build`, `~`, `D:` | **implicit cd** (as in fish): a folder path alone on the line enters it |
 | `/` | shows the current folder |
 | `game\`, `cd game\assets` | enters a folder you already visited, found by its name (see **Visited folders** below) |
-| `game.` | opens the folder (here, or a visited one, like `game\`) in Explorer and closes the shell |
+| `game` | opens the folder (here, or a visited one, like `game\`) in Explorer; the shell stays open and in the same folder. Only when `game` is not a command, so a program or alias of that name still wins |
+| `game.` | the same, and closes the shell |
 | `dirs` | lists the visited folders with their scores; `dirs -r [folder]` forgets one (the current by default), `dirs clear` forgets all |
 | `@prog args` | opens through Windows, in its own window, without waiting; a bare `@` opens the current folder |
 | `bg [-o] [-d] program [args...]` | runs the program in the background, in its own hidden console: the terminal stays free and closing it does not end the program. Whatever it writes (a progress bar, for example) stays in that console, to be seen later with `show pid`. It becomes a job (`jobs`, `wait %n`, `kill %n`) and prints `[n] pid`. `-o` sends stdout and stderr to `<program>_<pid>.txt` in the current folder (one file per run: `bg -o ping -n 30 server` writes `ping_11804.txt`; the input becomes `NUL`). With `-o` nothing is written to the console, so `show` opens an empty window: use `bg` without `-o` to see the prints (progress bars) with `show`, and `-o` only when you want the record in a file. `-d` disables the close button of the hidden console, so the shown window cannot end the program by accident. Programs only: built-ins, aliases and `[link]` run inside the shell itself and give an error |

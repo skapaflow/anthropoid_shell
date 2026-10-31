@@ -398,7 +398,7 @@ bool ant_is_builtin (const ANT_CMD *c) {
 	if (c->argc == 1 && (ant_cd_is_implicit(w) || ant_cd_is_open(w)))
 		return true;
 	command_text(c, text, ANTMAX);
-	return ant_calc_is_expression(text);
+	return ant_calc_is_expression(text) || (c->argc == 1 && ant_cd_is_view(w));
 }
 
 /* does the command read as a calculator expression (2 * 3, 2 3 +)? then the shell does not glob its * */
@@ -495,6 +495,8 @@ int ant_builtin (const ANT_CMD *c) {
 			result = ANT_BUILTIN_EXIT; /* name.: the folder opened in Explorer, so the shell closes */
 	} else if (!ant_cmd_calc(char_line_buf))
 		; /* calculator expression */
+	else if (c->argc == 1 && ant_cd_view(c->argv[0]))
+		; /* name: the folder in Explorer, shell open and in place (only when name is not a program) */
 	else
 		result = ANT_BUILTIN_NONE;
 

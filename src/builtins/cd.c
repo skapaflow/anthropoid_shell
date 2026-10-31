@@ -7,6 +7,7 @@
 
 #include "cd.h"
 #include "dirs.h"
+#include "path.h"
 #include "../console/console.h"
 #include "../shell/shell.h"
 
@@ -221,10 +222,19 @@ bool ant_cd_implicit (const wchar_t *word) {
 	return true;
 }
 
-/*
- * name.: the folder 'name' (word without the final dot) as the implicit cd would find it, plus a
- * bare name, from here or among the visited ones. ".", ".." and "..." are not names.
- */
+/* the folder 'name' means: as the implicit cd finds it, or a bare name from here or among the visited ones */
+static bool named_folder (const wchar_t *name, wchar_t *out, int max) {
+
+	if (implicit_target(name, out, max))
+		return true;
+	if (is_dir_here(name) && (int) wcslen(name) < max) {
+		wcscpy(out, name);
+		return true;
+	}
+	return ant_dirs_best(name, out, max, NULL);
+}
+
+/* name.: the folder of 'name' (word without the final dot). ".", ".." and "..." are not names. */
 static bool open_target (const wchar_t *word, wchar_t *out, int max) {
 
 	wchar_t spec[CD_PATH_MAX];
@@ -234,13 +244,32 @@ static bool open_target (const wchar_t *word, wchar_t *out, int max) {
 		return false;
 	wmemcpy(spec, word, n - 1);
 	spec[n - 1] = 0;
-	if (implicit_target(spec, out, max))
-		return true;
-	if (is_dir_here(spec) && n - 1 < max) {
-		wcscpy(out, spec);
-		return true;
+	return named_folder(spec, out, max);
+}
+
+/* opens the folder in Explorer, without waiting, and gives it a point in dirs; false if it did not open */
+static bool show_folder (const wchar_t *path) {
+
+	wchar_t full[CD_PATH_MAX];
+	SHELLEXECUTEINFOW sei;
+
+	if (!GetFullPathNameW(path, CD_PATH_MAX, full, NULL))
+		wcscpy(full, path);
+
+	memset(&sei, 0, sizeof sei);
+	sei.cbSize = sizeof sei;
+	sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+	sei.lpVerb = L"open";
+	sei.lpFile = full;
+	sei.nShow = SW_SHOWNORMAL;
+	if (!ShellExecuteExW(&sei)) {
+		ant_error(L"ant: %ls: cannot open (error %lu)", full, GetLastError());
+		ant_status = 1;
+		return false;
 	}
-	return ant_dirs_best(spec, out, max, NULL);
+	ant_dirs_add(full);
+	ant_status = 0;
+	return true;
 }
 
 /* is 'word' alone on the line a name. that opens a folder? (only checks) */
@@ -257,29 +286,43 @@ bool ant_cd_is_open (const wchar_t *word) {
  */
 bool ant_cd_open (const wchar_t *word, bool *close) {
 
-	wchar_t path[CD_PATH_MAX], full[CD_PATH_MAX];
-	SHELLEXECUTEINFOW sei;
+	wchar_t path[CD_PATH_MAX];
 
 	*close = false;
 	if (!open_target(word, path, CD_PATH_MAX))
 		return false;
-	if (!GetFullPathNameW(path, CD_PATH_MAX, full, NULL))
-		wcscpy(full, path);
+	*close = show_folder(path);
+	return true;
+}
 
-	memset(&sei, 0, sizeof sei);
-	sei.cbSize = sizeof sei;
-	sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
-	sei.lpVerb = L"open";
-	sei.lpFile = full;
-	sei.nShow = SW_SHOWNORMAL;
-	if (!ShellExecuteExW(&sei)) {
-		ant_error(L"ant: %ls: cannot open (error %lu)", full, GetLastError());
-		ant_status = 1;
-		return true;
-	}
-	ant_dirs_add(full);
-	ant_status = 0;
-	*close = true;
+/*
+ * A program of that name? Same search as the execution: [path], then the Windows one (.exe).
+ * 'name' alone opens a folder only when it is not a command, so a typo still says "command not found".
+ */
+static bool is_program (const wchar_t *word) {
+
+	wchar_t found[CD_PATH_MAX];
+
+	return (!wcspbrk(word, L"\\/:") && ant_path_find(word, found, CD_PATH_MAX)) ||
+		SearchPathW(NULL, word, L".exe", CD_PATH_MAX, found, NULL) > 0;
+}
+
+/* is 'word' alone on the line a name that opens a folder (and not a program)? (only checks) */
+bool ant_cd_is_view (const wchar_t *word) {
+
+	wchar_t path[CD_PATH_MAX];
+
+	return word[0] && named_folder(word, path, CD_PATH_MAX) && !is_program(word);
+}
+
+/* name: opens the folder in Explorer; the shell stays open and in the same folder. false if 'word' is not one */
+bool ant_cd_view (const wchar_t *word) {
+
+	wchar_t path[CD_PATH_MAX];
+
+	if (!word[0] || !named_folder(word, path, CD_PATH_MAX) || is_program(word))
+		return false;
+	show_folder(path);
 	return true;
 }
 
